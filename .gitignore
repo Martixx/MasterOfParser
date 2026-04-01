@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Datos locales de trabajo
+*.csv
+*.log
+ips_para_iocs.txt
+
+# Salidas generadas por la app
+*_CIM_PARSED.csv
+
+# Exportaciones de gráficos
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
