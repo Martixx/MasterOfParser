@@ -182,6 +182,7 @@ CIM_COLUMNS = [
     "action",
     "action_source",
     "rule",
+    "rule_uuid",
     "session_end_reason",
     # ── Origen ─────────────────────────────────────────────────────────────
     "src_ip",
