@@ -61,6 +61,7 @@ LEEF_TO_CIM = {
     "srcPort": "src_port",
     "SourceZone": "src_zone",
     "SrcHostname": "src_host",
+    "vSrcName": "src_host",
     "SrcMac": "src_mac",
     "IngressInterface": "inbound_interface",
     # Red - destino
@@ -85,6 +86,8 @@ LEEF_TO_CIM = {
     "ElapsedTime": "duration",
     # Usuario
     "usrName": "user",
+    "SourceUser": "user",
+    "SrcUser": "user",
     "DestinationUser": "dest_user",
     # Acción (QRadar exporta el EventID numérico en group4; la acción real viene en KV)
     "act": "action",
@@ -98,6 +101,7 @@ LEEF_TO_CIM = {
     "SerialNumber": "dvc_serial",
     "VirtualSystem": "virtual_system",
     "Subtype": "subtype",
+    "SrcDeviceOS": "src_os",
     # Sesión
     "SessionID": "session_id",
     "RepeatCount": "repeat_count",
@@ -136,10 +140,12 @@ FORTINET_TO_CIM = {
     "dstcountry": "dest_country",
     # Protocolo / App
     "service": "app",
+    "app": "app",  # UTM: sobreescribe service con la app detectada (más específica)
     "appcat": "url_category",
     # Acción / Regla
     "action": "action",
     "policyname": "rule",
+    "poluuid": "rule_uuid",
     "sessionid": "session_id",
     # Tráfico
     "sentbyte": "bytes_out",
@@ -149,7 +155,18 @@ FORTINET_TO_CIM = {
     "duration": "duration",
     # Endpoint info (muy útil en Fortinet)
     "osname": "src_os",
+    "srcosname": "src_os",
     "srcssid": "src_zone",
+    # Usuario autenticado (VPN/SSL-VPN/auth)
+    "user": "user",
+    "srcuser": "user",
+    "unauthuser": "user",
+    "xauthuser": "user",
+    # UTM: hostname destino (webfilter, app-ctrl)
+    "hostname": "dest_host",
+    "dstname": "dest_host",
+    # UTM webfilter: URL accedida
+    "url": "url",
 }
 
 # Columnas CIM de salida (orden para Excel)
@@ -188,6 +205,7 @@ CIM_COLUMNS = [
     "transport",
     "app",
     "url_category",
+    "url",
     # ── Tráfico ────────────────────────────────────────────────────────────
     "bytes_out",
     "bytes_in",
@@ -248,6 +266,7 @@ def _get_output_columns(include_raw_event: bool = False) -> list[str]:
         return list(CIM_COLUMNS)
     return [col for col in CIM_COLUMNS if col != "raw_event"]
 
+
 # Regex LEEF 2.0: captura vendor, product, version, eventid, delimiter y KV
 _LEEF_RE = re.compile(
     r"LEEF:2\.0\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|[^|]*\|(.*)", re.DOTALL
@@ -291,10 +310,16 @@ def parse_leef_line(line: str) -> dict | None:
         record["action"] = leef_event_id if not leef_event_id.isdigit() else ""
 
     # Normalización: Fortinet/otros usan "accept" → estandarizar a "allow"
-    _ACTION_NORM = {"accept": "allow", "permitted": "allow", "blocked": "deny",
-                   "dropped": "drop", "reset": "reset-both"}
-    record["action"] = _ACTION_NORM.get(record.get("action", "").lower(),
-                                         record.get("action", ""))
+    _ACTION_NORM = {
+        "accept": "allow",
+        "permitted": "allow",
+        "blocked": "deny",
+        "dropped": "drop",
+        "reset": "reset-both",
+    }
+    record["action"] = _ACTION_NORM.get(
+        record.get("action", "").lower(), record.get("action", "")
+    )
 
     return record
 
@@ -354,10 +379,16 @@ def parse_fortinet_line(line: str) -> dict | None:
         )
 
     # Normalizar acción: accept→allow, blocked→deny, etc.
-    _ACTION_NORM = {"accept": "allow", "permitted": "allow", "blocked": "deny",
-                    "dropped": "drop", "reset": "reset-both"}
-    record["action"] = _ACTION_NORM.get(record.get("action", "").lower(),
-                                        record.get("action", ""))
+    _ACTION_NORM = {
+        "accept": "allow",
+        "permitted": "allow",
+        "blocked": "deny",
+        "dropped": "drop",
+        "reset": "reset-both",
+    }
+    record["action"] = _ACTION_NORM.get(
+        record.get("action", "").lower(), record.get("action", "")
+    )
 
     return record
 
@@ -719,10 +750,12 @@ _PIVOT_FIELDS = [
     "transport",
     "app",
     "url_category",
+    "url",
     "user",
     "dest_user",
     "dvc",
     "dvc_serial",
+    "rule_uuid",
     "virtual_system",
     "inbound_interface",
     "outbound_interface",
@@ -858,6 +891,61 @@ def _safe_int(value) -> int:
     return int(_safe_float(value))
 
 
+def _first_non_empty(record: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = str(record.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def unify_cim_record(record: dict, forti_src_zone_mode: str = "ssid") -> dict:
+    """Consolida aliases/sinónimos en campos CIM canónicos."""
+    if not record:
+        return record
+
+    # Alias frecuentes para el mismo significado en distintas fuentes.
+    alias_candidates = {
+        "src_ip_nat": ["src_ip_nat", "src_nat_ip", "srcPostNAT"],
+        "dest_ip_nat": ["dest_ip_nat", "dst_nat_ip", "dstPostNAT"],
+        "src_zone": ["src_zone", "SourceZone", "srcintf", "inbound_interface"],
+        "dest_zone": ["dest_zone", "DestinationZone", "dstintf", "outbound_interface"],
+        "src_host": ["src_host", "SrcHostname", "srcname", "hostname"],
+        "dest_host": ["dest_host", "DstHostname", "dstname"],
+        "user": ["user", "usrName", "SourceUser", "SrcUser", "srcuser", "xauthuser"],
+        "rule": ["rule", "RuleName", "policyname", "policy_name"],
+        "rule_uuid": ["rule_uuid", "RuleUUID", "poluuid"],
+    }
+
+    for canonical_key, candidates in alias_candidates.items():
+        if not str(record.get(canonical_key, "") or "").strip():
+            record[canonical_key] = _first_non_empty(record, candidates)
+
+    # En Fortinet, src_zone puede representar SSID o interfaz física/lógica.
+    # Permitimos forzar interfaz para alinearlo con reportes operativos.
+    if record.get("vendor") == "Fortinet" and forti_src_zone_mode == "interface":
+        inbound_interface = str(record.get("inbound_interface", "") or "").strip()
+        if inbound_interface:
+            record["src_zone"] = inbound_interface
+
+    # Si faltan los totales, derivarlos de in/out para mantener consistencia CIM.
+    if not str(record.get("bytes_total", "") or "").strip():
+        bytes_total = _safe_int(record.get("bytes_in")) + _safe_int(
+            record.get("bytes_out")
+        )
+        if bytes_total > 0:
+            record["bytes_total"] = str(bytes_total)
+
+    if not str(record.get("packets_total", "") or "").strip():
+        packets_total = _safe_int(record.get("packets_in")) + _safe_int(
+            record.get("packets_out")
+        )
+        if packets_total > 0:
+            record["packets_total"] = str(packets_total)
+
+    return record
+
+
 def _is_private_ip(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -890,7 +978,9 @@ def _floor_timestamp(dt: datetime, bucket: str) -> datetime:
     if bucket == "Mes":
         return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if bucket == "Semana":
-        return (dt - timedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return (dt - timedelta(days=dt.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
     if bucket == "Día":
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return dt.replace(minute=0, second=0, microsecond=0)
@@ -985,17 +1075,60 @@ class MasterOfParserGUI:
             img.put("#1a1a1a", to=(0, 0, 16, 16))
             # Rayo dorado (forma de zigzag vertical)
             bolt = [
-                (8,1),(9,1),(10,1),(11,1),
-                (7,2),(8,2),(9,2),(10,2),
-                (6,3),(7,3),(8,3),(9,3),
-                (5,4),(6,4),(7,4),(8,4),
-                (4,5),(5,5),(6,5),(7,5),(8,5),(9,5),(10,5),(11,5),(12,5),
-                (3,6),(4,6),(5,6),(6,6),(7,6),(8,6),(9,6),(10,6),(11,6),
-                (6,7),(7,7),(8,7),(9,7),
-                (5,8),(6,8),(7,8),(8,8),
-                (4,9),(5,9),(6,9),(7,9),
-                (3,10),(4,10),(5,10),(6,10),
-                (2,11),(3,11),(4,11),(5,11),
+                (8, 1),
+                (9, 1),
+                (10, 1),
+                (11, 1),
+                (7, 2),
+                (8, 2),
+                (9, 2),
+                (10, 2),
+                (6, 3),
+                (7, 3),
+                (8, 3),
+                (9, 3),
+                (5, 4),
+                (6, 4),
+                (7, 4),
+                (8, 4),
+                (4, 5),
+                (5, 5),
+                (6, 5),
+                (7, 5),
+                (8, 5),
+                (9, 5),
+                (10, 5),
+                (11, 5),
+                (12, 5),
+                (3, 6),
+                (4, 6),
+                (5, 6),
+                (6, 6),
+                (7, 6),
+                (8, 6),
+                (9, 6),
+                (10, 6),
+                (11, 6),
+                (6, 7),
+                (7, 7),
+                (8, 7),
+                (9, 7),
+                (5, 8),
+                (6, 8),
+                (7, 8),
+                (8, 8),
+                (4, 9),
+                (5, 9),
+                (6, 9),
+                (7, 9),
+                (3, 10),
+                (4, 10),
+                (5, 10),
+                (6, 10),
+                (2, 11),
+                (3, 11),
+                (4, 11),
+                (5, 11),
             ]
             for x, y in bolt:
                 img.put("#f0b429", to=(x, y))
@@ -1007,25 +1140,48 @@ class MasterOfParserGUI:
     def _draw_header_logo(self, parent):
         """Header oscuro con logo canvas + nombre de app."""
         # Canvas para el logo (rayo + M estilizada)
-        c = tk.Canvas(parent, width=200, height=44, bg="#1a1a1a",
-                      highlightthickness=0)
+        c = tk.Canvas(parent, width=200, height=44, bg="#1a1a1a", highlightthickness=0)
         c.pack(side="left", padx=(12, 0))
 
         # Rayo dorado (polígono)
         c.create_polygon(
-            28,4,  38,4,  30,22, 40,22,  18,42,  26,24,  16,24,
-            fill="#f0b429", outline="#c8960a", width=1,
+            28,
+            4,
+            38,
+            4,
+            30,
+            22,
+            40,
+            22,
+            18,
+            42,
+            26,
+            24,
+            16,
+            24,
+            fill="#f0b429",
+            outline="#c8960a",
+            width=1,
         )
         # Nombre app
-        c.create_text(52, 14, text="MasterOf", anchor="w",
-                      font=("Segoe UI", 13, "bold"), fill="#ffffff")
-        c.create_text(52, 30, text="Parser", anchor="w",
-                      font=("Segoe UI", 11), fill="#f0b429")
+        c.create_text(
+            52,
+            14,
+            text="MasterOf",
+            anchor="w",
+            font=("Segoe UI", 13, "bold"),
+            fill="#ffffff",
+        )
+        c.create_text(
+            52, 30, text="Parser", anchor="w", font=("Segoe UI", 11), fill="#f0b429"
+        )
 
         # Subtítulo / tagline derecha
         tk.Label(
-            parent, text="🤘  Firewall Log Intelligence",
-            bg="#1a1a1a", fg="#888888",
+            parent,
+            text="🤘  Firewall Log Intelligence",
+            bg="#1a1a1a",
+            fg="#888888",
             font=("Segoe UI", 9),
         ).pack(side="left", padx=16)
 
@@ -1096,6 +1252,22 @@ class MasterOfParserGUI:
             row,
             text="Incluir raw_event (más pesado; útil para depuración)",
             variable=self._raw_event_var,
+        ).pack(side="left")
+
+        row = ttk.Frame(tab)
+        row.pack(fill="x", **pad)
+        ttk.Label(row, text="Forti src_zone", width=20, anchor="w").pack(side="left")
+        self._forti_src_zone_mode_var = tk.StringVar(value="ssid")
+        ttk.Combobox(
+            row,
+            textvariable=self._forti_src_zone_mode_var,
+            values=["ssid", "interface"],
+            width=12,
+            state="readonly",
+        ).pack(side="left", padx=4)
+        ttk.Label(
+            row,
+            text="ssid = nombre WiFi, interface = CORP-WIFI/GUEST-WIFI",
         ).pack(side="left")
 
         ttk.Separator(tab, orient="horizontal").pack(fill="x", padx=8, pady=6)
@@ -1300,6 +1472,7 @@ class MasterOfParserGUI:
         output_file = self._out_var.get().strip() or None
         ioc_only = self._ioconly_var.get()
         include_raw_event = self._raw_event_var.get()
+        forti_src_zone_mode = self._forti_src_zone_mode_var.get().strip() or "ssid"
         extract_ips = (
             self._extract_path_var.get().strip() if self._extract_var.get() else None
         )
@@ -1328,6 +1501,7 @@ class MasterOfParserGUI:
                 ioc_only,
                 extract_ips,
                 include_raw_event,
+                forti_src_zone_mode,
             ),
             daemon=True,
         ).start()
@@ -1342,6 +1516,7 @@ class MasterOfParserGUI:
         ioc_only,
         extract_ips,
         include_raw_event,
+        forti_src_zone_mode,
     ):
         q = self._queue
 
@@ -1383,6 +1558,7 @@ class MasterOfParserGUI:
             log(f"[+] Líneas:    {total_lines:,}")
             if include_raw_event:
                 log("[+] raw_event: activado (salida más pesada)")
+            log(f"[+] Forti src_zone: {forti_src_zone_mode}")
 
             parsed = 0
             skipped = 0
@@ -1416,6 +1592,8 @@ class MasterOfParserGUI:
                         skipped += 1
                         continue
 
+                    record = unify_cim_record(record, forti_src_zone_mode)
+
                     vendor_name = record.get("vendor", "(sin_vendor)")
                     vendor_counts[vendor_name] += 1
 
@@ -1443,7 +1621,9 @@ class MasterOfParserGUI:
 
                     if include_raw_event:
                         record["raw_event"] = line
-                    writer.writerow({col: record.get(col, "") for col in output_columns})
+                    writer.writerow(
+                        {col: record.get(col, "") for col in output_columns}
+                    )
                     parsed += 1
 
             if extract_ips and unique_ips:
@@ -1558,11 +1738,20 @@ class MasterOfParserGUI:
                 not in self._pivot_secondary_col_cb["values"]
             ):
                 self._pivot_secondary_col_var.set(_NO_SECONDARY_FIELD)
-            if self._hist_series_col_var.get() not in self._hist_series_col_cb["values"]:
+            if (
+                self._hist_series_col_var.get()
+                not in self._hist_series_col_cb["values"]
+            ):
                 self._hist_series_col_var.set(_NO_SERIES_FIELD)
-            if self._hist_filter1_field_var.get() not in self._hist_filter1_field_cb["values"]:
+            if (
+                self._hist_filter1_field_var.get()
+                not in self._hist_filter1_field_cb["values"]
+            ):
                 self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
-            if self._hist_filter2_field_var.get() not in self._hist_filter2_field_cb["values"]:
+            if (
+                self._hist_filter2_field_var.get()
+                not in self._hist_filter2_field_cb["values"]
+            ):
                 self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
             self._status_var.set(
                 f"{len(rows):,} filas  |  {len(cols)} columnas  |  {os.path.basename(path)}"
@@ -1604,22 +1793,32 @@ class MasterOfParserGUI:
             for child in body.winfo_children():
                 child.destroy()
 
-            ttk.Button(header, text="<", width=3, command=lambda: move(-1)).pack(side="left")
+            ttk.Button(header, text="<", width=3, command=lambda: move(-1)).pack(
+                side="left"
+            )
             ttk.Label(
                 header,
                 text=f"{calendar.month_name[state['month']]} {state['year']}",
                 anchor="center",
             ).pack(side="left", fill="x", expand=True)
-            ttk.Button(header, text=">", width=3, command=lambda: move(1)).pack(side="right")
+            ttk.Button(header, text=">", width=3, command=lambda: move(1)).pack(
+                side="right"
+            )
 
             for idx, name in enumerate(("Lu", "Ma", "Mi", "Ju", "Vi", "Sa", "Do")):
-                ttk.Label(body, text=name, anchor="center", width=4).grid(row=0, column=idx, padx=1, pady=1)
+                ttk.Label(body, text=name, anchor="center", width=4).grid(
+                    row=0, column=idx, padx=1, pady=1
+                )
 
-            month_matrix = calendar.Calendar(firstweekday=0).monthdayscalendar(state["year"], state["month"])
+            month_matrix = calendar.Calendar(firstweekday=0).monthdayscalendar(
+                state["year"], state["month"]
+            )
             for row_idx, week in enumerate(month_matrix, start=1):
                 for col_idx, day in enumerate(week):
                     if day == 0:
-                        ttk.Label(body, text="", width=4).grid(row=row_idx, column=col_idx, padx=1, pady=1)
+                        ttk.Label(body, text="", width=4).grid(
+                            row=row_idx, column=col_idx, padx=1, pady=1
+                        )
                     else:
                         ttk.Button(
                             body,
@@ -1662,10 +1861,14 @@ class MasterOfParserGUI:
         for child in self._results_filters_frame.winfo_children():
             child.destroy()
         if not self._results_filters:
-            ttk.Label(self._results_filters_frame, text="(ninguno)", foreground="#777777").pack(side="left")
+            ttk.Label(
+                self._results_filters_frame, text="(ninguno)", foreground="#777777"
+            ).pack(side="left")
             return
         for idx, filter_item in enumerate(self._results_filters):
-            chip = tk.Frame(self._results_filters_frame, bg="#e9eef8", bd=1, relief="solid")
+            chip = tk.Frame(
+                self._results_filters_frame, bg="#e9eef8", bd=1, relief="solid"
+            )
             chip.pack(side="left", padx=3, pady=2)
             tk.Label(
                 chip,
@@ -1703,16 +1906,24 @@ class MasterOfParserGUI:
         self._apply_filter()
 
     def _apply_filter(self):
-        has_dates = bool(self._results_from_var.get().strip() or self._results_to_var.get().strip())
+        has_dates = bool(
+            self._results_from_var.get().strip() or self._results_to_var.get().strip()
+        )
         if not self._results_filters and not has_dates:
             self._setup_tree(self._csv_columns, self._all_rows)
             self._status_var.set(f"{len(self._all_rows):,} filas (sin filtro)")
             return
 
         filtered = []
-        start_dt = self._parse_time_bound(self._results_from_var.get().strip(), is_end=False)
+        start_dt = self._parse_time_bound(
+            self._results_from_var.get().strip(), is_end=False
+        )
         end_dt = self._parse_time_bound(self._results_to_var.get().strip(), is_end=True)
-        timestamp_idx = self._csv_columns.index("timestamp") if "timestamp" in self._csv_columns else -1
+        timestamp_idx = (
+            self._csv_columns.index("timestamp")
+            if "timestamp" in self._csv_columns
+            else -1
+        )
 
         for row in self._all_rows:
             ok = True
@@ -1759,7 +1970,9 @@ class MasterOfParserGUI:
         if end_dt:
             extra.append(f"hasta {self._results_to_var.get().strip()}")
         suffix = f" | {' | '.join(extra)}" if extra else ""
-        self._status_var.set(f"{len(filtered):,} de {len(self._all_rows):,} filas filtradas{suffix}")
+        self._status_var.set(
+            f"{len(filtered):,} de {len(self._all_rows):,} filas filtradas{suffix}"
+        )
 
     def _clear_filter(self):
         self._filter_var.set("")
@@ -1777,12 +1990,14 @@ class MasterOfParserGUI:
             return
 
         # Identificar columna y valor bajo el cursor
-        col_id = self._tree.identify_column(event.x)   # "#1", "#2", ...
+        col_id = self._tree.identify_column(event.x)  # "#1", "#2", ...
         row_id = self._tree.identify_row(event.y)
 
         try:
             col_idx = int(col_id.lstrip("#")) - 1
-            col_name = self._csv_columns[col_idx] if col_idx < len(self._csv_columns) else ""
+            col_name = (
+                self._csv_columns[col_idx] if col_idx < len(self._csv_columns) else ""
+            )
         except (ValueError, IndexError):
             return
 
@@ -1809,23 +2024,31 @@ class MasterOfParserGUI:
             m.add_separator()
             m.add_command(
                 label=f'Análisis → Filtro 1 incluir: {col_name} = "{cell_value}"',
-                command=lambda: self._send_to_analysis(1, col_name, cell_value, exclude=False),
+                command=lambda: self._send_to_analysis(
+                    1, col_name, cell_value, exclude=False
+                ),
             )
             m.add_command(
                 label=f'Análisis → Filtro 1 excluir: {col_name} ≠ "{cell_value}"',
-                command=lambda: self._send_to_analysis(1, col_name, cell_value, exclude=True),
+                command=lambda: self._send_to_analysis(
+                    1, col_name, cell_value, exclude=True
+                ),
             )
             m.add_command(
                 label=f'Análisis → Filtro 2 incluir: {col_name} = "{cell_value}"',
-                command=lambda: self._send_to_analysis(2, col_name, cell_value, exclude=False),
+                command=lambda: self._send_to_analysis(
+                    2, col_name, cell_value, exclude=False
+                ),
             )
             m.add_command(
                 label=f'Análisis → Filtro 2 excluir: {col_name} ≠ "{cell_value}"',
-                command=lambda: self._send_to_analysis(2, col_name, cell_value, exclude=True),
+                command=lambda: self._send_to_analysis(
+                    2, col_name, cell_value, exclude=True
+                ),
             )
             m.add_separator()
             m.add_command(
-                label=f'Análisis → Agrupar por: {col_name}',
+                label=f"Análisis → Agrupar por: {col_name}",
                 command=lambda: self._send_to_analysis_group(col_name),
             )
 
@@ -1859,10 +2082,14 @@ class MasterOfParserGUI:
         self._analysis_filter2_value_var.set("")
 
         if non_vendor_filters:
-            self._analysis_filter1_field_var.set(non_vendor_filters[0].get("field", _NO_FILTER_FIELD))
+            self._analysis_filter1_field_var.set(
+                non_vendor_filters[0].get("field", _NO_FILTER_FIELD)
+            )
             self._analysis_filter1_value_var.set(non_vendor_filters[0].get("value", ""))
         if len(non_vendor_filters) > 1:
-            self._analysis_filter2_field_var.set(non_vendor_filters[1].get("field", _NO_FILTER_FIELD))
+            self._analysis_filter2_field_var.set(
+                non_vendor_filters[1].get("field", _NO_FILTER_FIELD)
+            )
             self._analysis_filter2_value_var.set(non_vendor_filters[1].get("value", ""))
         if len(non_vendor_filters) > 2:
             messagebox.showinfo(
@@ -1871,7 +2098,9 @@ class MasterOfParserGUI:
             )
         self._nb.select(self._tab_analysis)
 
-    def _send_to_analysis(self, slot: int, col_name: str, value: str, exclude: bool = False):
+    def _send_to_analysis(
+        self, slot: int, col_name: str, value: str, exclude: bool = False
+    ):
         """Envía col=valor como Filtro 1 o Filtro 2 en Análisis y cambia a esa pestaña."""
         formatted = f"!{value}" if exclude else f"={value}"
         if slot == 1:
@@ -2106,50 +2335,182 @@ class MasterOfParserGUI:
         ttk.Label(ctrl, text="Accesos rápidos:", font=("", 9, "bold")).pack(
             anchor="w", pady=(0, 4)
         )
-        ttk.Label(ctrl, text="(filtros: = exacto, ! excluye)", font=("", 7), foreground="#888888").pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            ctrl,
+            text="(filtros: = exacto, ! excluye)",
+            font=("", 7),
+            foreground="#888888",
+        ).pack(anchor="w", pady=(0, 4))
         presets = [
             # ── Generales ───────────────────────────────────────
-            dict(label="Top IPs origen",       col="src_ip",       metric="Recuento",         chart="Barras horizontales"),
-            dict(label="Acciones fw",           col="action",       metric="Recuento",         chart="Quesito (pie)"),
-            dict(label="Aplicaciones",          col="app",          metric="Recuento",         chart="Barras horizontales"),
-            dict(label="Puertos destino",       col="dest_port",    metric="Recuento",         chart="Barras horizontales"),
-            dict(label="Zona origen",           col="src_zone",     metric="Recuento",         chart="Quesito (pie)"),
-            dict(label="Protocolo",             col="transport",    metric="Recuento",         chart="Quesito (pie)"),
-            dict(label="Vendor / fuente",       col="vendor",       metric="Recuento",         chart="Barras verticales"),
-            dict(label="Reglas firewall",       col="rule",         metric="Recuento",         chart="Barras horizontales"),
-            dict(label="Volumen por IP src",    col="src_ip",       metric="Suma bytes_total", chart="Barras horizontales"),
+            dict(
+                label="Top IPs origen",
+                col="src_ip",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Acciones fw",
+                col="action",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
+            dict(
+                label="Aplicaciones",
+                col="app",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Puertos destino",
+                col="dest_port",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Zona origen",
+                col="src_zone",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
+            dict(
+                label="Protocolo",
+                col="transport",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
+            dict(
+                label="Vendor / fuente",
+                col="vendor",
+                metric="Recuento",
+                chart="Barras verticales",
+            ),
+            dict(
+                label="Reglas firewall",
+                col="rule",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Volumen por IP src",
+                col="src_ip",
+                metric="Suma bytes_total",
+                chart="Barras horizontales",
+            ),
             # ── IOC ────────────────────────────────────────────────────
-            dict(label="País destino (IOC)",    col="ioc_dst_country", metric="Recuento",     chart="Barras horizontales"),
-            dict(label="País origen (IOC)",     col="ioc_src_country", metric="Recuento",     chart="Barras horizontales"),
-            dict(label="Riesgo IOC dst",        col="ioc_dst_risk",    metric="Recuento",     chart="Barras verticales"),
-            dict(label="Top IOC hits",          col="ioc_dst_source",  metric="Recuento",     chart="Barras horizontales",  ioc_only=True),
+            dict(
+                label="País destino (IOC)",
+                col="ioc_dst_country",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="País origen (IOC)",
+                col="ioc_src_country",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Riesgo IOC dst",
+                col="ioc_dst_risk",
+                metric="Recuento",
+                chart="Barras verticales",
+            ),
+            dict(
+                label="Top IOC hits",
+                col="ioc_dst_source",
+                metric="Recuento",
+                chart="Barras horizontales",
+                ioc_only=True,
+            ),
             # ── Granulares ──────────────────────────────────────────────
-            dict(label="Top IPs → allow",       col="src_ip",      metric="Recuento", chart="Barras horizontales",
-                 f1_field="action",   f1_value="=allow"),
-            dict(label="Top IPs → deny/drop",   col="src_ip",      metric="Recuento", chart="Barras horizontales",
-                 f1_field="action",   f1_value="deny"),
-            dict(label="Top IPs src (no WiFi)", col="src_ip",      metric="Recuento", chart="Barras horizontales",
-                 f1_field="src_zone", f1_value="!wifi"),
-            dict(label="Top IPs src / acción",  col="src_ip",      secondary="action",           metric="Recuento", chart="Barras horizontales"),
-            dict(label="Top IPs src / país dst",col="src_ip",      secondary="ioc_dst_country",  metric="Recuento", chart="Barras horizontales"),
-            dict(label="App / zona origen",     col="app",         secondary="src_zone",          metric="Recuento", chart="Barras horizontales"),
-            dict(label="Regla / acción",        col="rule",        secondary="action",            metric="Recuento", chart="Barras horizontales"),
-            dict(label="Destino externo allow", col="dest_ip",     metric="Recuento", chart="Barras horizontales",
-                 f1_field="action",       f1_value="=allow",
-                 f2_field="traffic_scope",f2_value="=lan→wan"),
-            dict(label="Src no WiFi allow",     col="src_ip",      secondary="app",  metric="Recuento", chart="Barras horizontales",
-                 f1_field="action",   f1_value="=allow",
-                 f2_field="src_zone", f2_value="!wifi"),
+            dict(
+                label="Top IPs → allow",
+                col="src_ip",
+                metric="Recuento",
+                chart="Barras horizontales",
+                f1_field="action",
+                f1_value="=allow",
+            ),
+            dict(
+                label="Top IPs → deny/drop",
+                col="src_ip",
+                metric="Recuento",
+                chart="Barras horizontales",
+                f1_field="action",
+                f1_value="deny",
+            ),
+            dict(
+                label="Top IPs src (no WiFi)",
+                col="src_ip",
+                metric="Recuento",
+                chart="Barras horizontales",
+                f1_field="src_zone",
+                f1_value="!wifi",
+            ),
+            dict(
+                label="Top IPs src / acción",
+                col="src_ip",
+                secondary="action",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Top IPs src / país dst",
+                col="src_ip",
+                secondary="ioc_dst_country",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="App / zona origen",
+                col="app",
+                secondary="src_zone",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Regla / acción",
+                col="rule",
+                secondary="action",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="Destino externo allow",
+                col="dest_ip",
+                metric="Recuento",
+                chart="Barras horizontales",
+                f1_field="action",
+                f1_value="=allow",
+                f2_field="traffic_scope",
+                f2_value="=lan→wan",
+            ),
+            dict(
+                label="Src no WiFi allow",
+                col="src_ip",
+                secondary="app",
+                metric="Recuento",
+                chart="Barras horizontales",
+                f1_field="action",
+                f1_value="=allow",
+                f2_field="src_zone",
+                f2_value="!wifi",
+            ),
         ]
         for p in presets:
             ttk.Button(
                 ctrl,
                 text=p["label"],
                 command=lambda kw=p: self._apply_preset(
-                    kw["col"], kw["metric"], kw["chart"],
+                    kw["col"],
+                    kw["metric"],
+                    kw["chart"],
                     secondary=kw.get("secondary"),
-                    f1_field=kw.get("f1_field"), f1_value=kw.get("f1_value", ""),
-                    f2_field=kw.get("f2_field"), f2_value=kw.get("f2_value", ""),
+                    f1_field=kw.get("f1_field"),
+                    f1_value=kw.get("f1_value", ""),
+                    f2_field=kw.get("f2_field"),
+                    f2_value=kw.get("f2_value", ""),
                     ioc_only=kw.get("ioc_only"),
                 ),
             ).pack(fill="x", pady=1)
@@ -2222,7 +2583,9 @@ class MasterOfParserGUI:
         ttk.Label(ctrl, text="Hasta:").pack(anchor="w")
         self._hist_to_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._hist_to_var).pack(fill="x", pady=(0, 8))
-        ttk.Label(ctrl, text="Formato: YYYY-MM-DD o YYYY-MM-DD HH:MM", foreground="#777777").pack(anchor="w", pady=(0, 8))
+        ttk.Label(
+            ctrl, text="Formato: YYYY-MM-DD o YYYY-MM-DD HH:MM", foreground="#777777"
+        ).pack(anchor="w", pady=(0, 8))
 
         ttk.Label(ctrl, text="Filtro 1:").pack(anchor="w")
         self._hist_filter1_field_var = tk.StringVar(value=_NO_FILTER_FIELD)
@@ -2235,7 +2598,9 @@ class MasterOfParserGUI:
         )
         self._hist_filter1_field_cb.pack(fill="x", pady=(0, 4))
         self._hist_filter1_value_var = tk.StringVar()
-        ttk.Entry(ctrl, textvariable=self._hist_filter1_value_var).pack(fill="x", pady=(0, 8))
+        ttk.Entry(ctrl, textvariable=self._hist_filter1_value_var).pack(
+            fill="x", pady=(0, 8)
+        )
 
         ttk.Label(ctrl, text="Filtro 2:").pack(anchor="w")
         self._hist_filter2_field_var = tk.StringVar(value=_NO_FILTER_FIELD)
@@ -2248,7 +2613,9 @@ class MasterOfParserGUI:
         )
         self._hist_filter2_field_cb.pack(fill="x", pady=(0, 4))
         self._hist_filter2_value_var = tk.StringVar()
-        ttk.Entry(ctrl, textvariable=self._hist_filter2_value_var).pack(fill="x", pady=(0, 8))
+        ttk.Entry(ctrl, textvariable=self._hist_filter2_value_var).pack(
+            fill="x", pady=(0, 8)
+        )
 
         ttk.Label(ctrl, text="Intervalo:").pack(anchor="w")
         self._hist_bucket_var = tk.StringVar(value="Hora")
@@ -2283,19 +2650,36 @@ class MasterOfParserGUI:
             width=7,
         ).pack(side="left")
         self._hist_topn_all = tk.BooleanVar()
-        ttk.Checkbutton(hist_top_row, text="Todas", variable=self._hist_topn_all).pack(side="left", padx=6)
+        ttk.Checkbutton(hist_top_row, text="Todas", variable=self._hist_topn_all).pack(
+            side="left", padx=6
+        )
 
         self._hist_exclude_empty_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ctrl, text="Excluir claves vacías", variable=self._hist_exclude_empty_var).pack(anchor="w", pady=(0, 6))
+        ttk.Checkbutton(
+            ctrl, text="Excluir claves vacías", variable=self._hist_exclude_empty_var
+        ).pack(anchor="w", pady=(0, 6))
         self._hist_ioc_only_var = tk.BooleanVar()
-        ttk.Checkbutton(ctrl, text="Solo IOC hits", variable=self._hist_ioc_only_var).pack(anchor="w", pady=(0, 8))
+        ttk.Checkbutton(
+            ctrl, text="Solo IOC hits", variable=self._hist_ioc_only_var
+        ).pack(anchor="w", pady=(0, 8))
 
-        ttk.Button(ctrl, text="📊  Generar histograma", command=self._generate_histogram_view).pack(fill="x")
-        ttk.Button(ctrl, text="💾  Exportar imagen…", command=self._export_hist_chart).pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            ctrl, text="📊  Generar histograma", command=self._generate_histogram_view
+        ).pack(fill="x")
+        ttk.Button(
+            ctrl, text="💾  Exportar imagen…", command=self._export_hist_chart
+        ).pack(fill="x", pady=(4, 0))
 
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(ctrl, text="Ejemplos:", font=("", 9, "bold")).pack(anchor="w", pady=(0, 4))
-        ttk.Label(ctrl, text="Serie por src_zone\nSerie por dest_country\nSerie por src_ip", foreground="#666666", justify="left").pack(anchor="w")
+        ttk.Label(ctrl, text="Ejemplos:", font=("", 9, "bold")).pack(
+            anchor="w", pady=(0, 4)
+        )
+        ttk.Label(
+            ctrl,
+            text="Serie por src_zone\nSerie por dest_country\nSerie por src_ip",
+            foreground="#666666",
+            justify="left",
+        ).pack(anchor="w")
 
         right = ttk.PanedWindow(paned, orient="vertical")
         paned.add(right, weight=1)
@@ -2303,7 +2687,9 @@ class MasterOfParserGUI:
         tbl_frame = ttk.LabelFrame(right, text="Series", padding=4)
         right.add(tbl_frame, weight=1)
         self._hist_tree = ttk.Treeview(tbl_frame, show="headings", height=8)
-        hist_vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self._hist_tree.yview)
+        hist_vsb = ttk.Scrollbar(
+            tbl_frame, orient="vertical", command=self._hist_tree.yview
+        )
         self._hist_tree.configure(yscrollcommand=hist_vsb.set)
         self._hist_tree.pack(side="left", fill="both", expand=True)
         hist_vsb.pack(side="right", fill="y")
@@ -2312,7 +2698,9 @@ class MasterOfParserGUI:
         right.add(chart_frame, weight=2)
         if _HAS_MPL:
             self._hist_fig = Figure(figsize=(8.8, 5.2), dpi=110, facecolor="#ffffff")
-            self._hist_canvas_mpl = FigureCanvasTkAgg(self._hist_fig, master=chart_frame)
+            self._hist_canvas_mpl = FigureCanvasTkAgg(
+                self._hist_fig, master=chart_frame
+            )
             self._hist_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
         else:
             self._hist_canvas_mpl = None
@@ -2323,8 +2711,12 @@ class MasterOfParserGUI:
                 foreground="gray",
             ).pack(expand=True)
 
-        self._hist_status_var = tk.StringVar(value="Carga un CSV para generar histogramas.")
-        ttk.Label(tab, textvariable=self._hist_status_var, anchor="w").pack(fill="x", padx=8, pady=(0, 4))
+        self._hist_status_var = tk.StringVar(
+            value="Carga un CSV para generar histogramas."
+        )
+        ttk.Label(tab, textvariable=self._hist_status_var, anchor="w").pack(
+            fill="x", padx=8, pady=(0, 4)
+        )
 
     def _apply_preset(
         self,
@@ -2419,7 +2811,9 @@ class MasterOfParserGUI:
             return cmp_value.lower() not in cell_value
         return cmp_value.lower() in cell_value
 
-    def _parse_time_bound(self, raw_value: str, is_end: bool = False) -> datetime | None:
+    def _parse_time_bound(
+        self, raw_value: str, is_end: bool = False
+    ) -> datetime | None:
         text = str(raw_value or "").strip()
         if not text:
             return None
@@ -2446,7 +2840,11 @@ class MasterOfParserGUI:
     ) -> list:
         start_dt = self._parse_time_bound(from_value, is_end=False)
         end_dt = self._parse_time_bound(to_value, is_end=True)
-        timestamp_idx = self._csv_columns.index("timestamp") if "timestamp" in self._csv_columns else -1
+        timestamp_idx = (
+            self._csv_columns.index("timestamp")
+            if "timestamp" in self._csv_columns
+            else -1
+        )
 
         result = []
         for row in rows:
@@ -2454,8 +2852,16 @@ class MasterOfParserGUI:
                 if self._get_row_value(row, "vendor") != vendor_filter:
                     continue
             if ioc_only:
-                src_ioc = self._get_row_value(row, "ioc_src") == "YES" if "ioc_src" in self._csv_columns else False
-                dst_ioc = self._get_row_value(row, "ioc_dst") == "YES" if "ioc_dst" in self._csv_columns else False
+                src_ioc = (
+                    self._get_row_value(row, "ioc_src") == "YES"
+                    if "ioc_src" in self._csv_columns
+                    else False
+                )
+                dst_ioc = (
+                    self._get_row_value(row, "ioc_dst") == "YES"
+                    if "ioc_dst" in self._csv_columns
+                    else False
+                )
                 if not (src_ioc or dst_ioc):
                     continue
             if not self._apply_generic_filter(row, filter1_field, filter1_value):
@@ -2489,7 +2895,10 @@ class MasterOfParserGUI:
         parts = []
         if vendor_filter and vendor_filter != "(todos)":
             parts.append(f"vendor={vendor_filter}")
-        for field_name, field_value in ((filter1_field, filter1_value), (filter2_field, filter2_value)):
+        for field_name, field_value in (
+            (filter1_field, filter1_value),
+            (filter2_field, filter2_value),
+        ):
             if field_name and field_name != _NO_FILTER_FIELD and field_value:
                 if field_value.startswith("!"):
                     op = "≠"
@@ -2583,11 +2992,21 @@ class MasterOfParserGUI:
         if _vnd and _vnd != "(todos)":
             _fparts.append(f"vendor={_vnd}")
         for _ff, _fv in (
-            (self._analysis_filter1_field_var.get().strip(), self._analysis_filter1_value_var.get().strip()),
-            (self._analysis_filter2_field_var.get().strip(), self._analysis_filter2_value_var.get().strip()),
+            (
+                self._analysis_filter1_field_var.get().strip(),
+                self._analysis_filter1_value_var.get().strip(),
+            ),
+            (
+                self._analysis_filter2_field_var.get().strip(),
+                self._analysis_filter2_value_var.get().strip(),
+            ),
         ):
             if _ff and _ff != _NO_FILTER_FIELD and _fv:
-                _op = "≠" if _fv.startswith("!") else ("=" if _fv.startswith("=") else "≈")
+                _op = (
+                    "≠"
+                    if _fv.startswith("!")
+                    else ("=" if _fv.startswith("=") else "≈")
+                )
                 _fparts.append(f"{_ff}{_op}{_fv.lstrip('!=').strip()}")
         if self._pivot_ioc_only_var.get():
             _fparts.append("solo IOC")
@@ -2800,7 +3219,13 @@ class MasterOfParserGUI:
         ax.tick_params(colors="#444444")
 
     def _draw_chart(
-        self, labels: list, values: list, col: str, metric: str, chart_type: str, subtitle: str = ""
+        self,
+        labels: list,
+        values: list,
+        col: str,
+        metric: str,
+        chart_type: str,
+        subtitle: str = "",
     ):
         self._fig.clear()
         ax = self._fig.add_subplot(111)
@@ -2894,7 +3319,9 @@ class MasterOfParserGUI:
         if subtitle:
             ax.set_title(
                 f"{col}  —  {metric}\n{subtitle}",
-                fontsize=10, pad=8, color="#222222",
+                fontsize=10,
+                pad=8,
+                color="#222222",
             )
         else:
             ax.set_title(f"{col}  —  {metric}", fontsize=11, pad=10, color="#222222")
@@ -2960,7 +3387,9 @@ class MasterOfParserGUI:
             messagebox.showwarning("Sin datos", "Carga primero un CSV para analizarlo.")
             return
         if "timestamp" not in self._csv_columns:
-            messagebox.showerror("Sin timestamp", "El CSV no contiene la columna 'timestamp'.")
+            messagebox.showerror(
+                "Sin timestamp", "El CSV no contiene la columna 'timestamp'."
+            )
             return
 
         bucket = self._anomaly_bucket_var.get()
@@ -2970,7 +3399,9 @@ class MasterOfParserGUI:
         if metric != "Recuento":
             metric_name = metric.replace("Suma ", "")
             if metric_name not in self._csv_columns:
-                messagebox.showerror("Métrica no disponible", f"No existe la columna '{metric_name}'.")
+                messagebox.showerror(
+                    "Métrica no disponible", f"No existe la columna '{metric_name}'."
+                )
                 return
             metric_idx = self._csv_columns.index(metric_name)
 
@@ -2982,7 +3413,9 @@ class MasterOfParserGUI:
             if dt is None:
                 continue
             bucket_dt = _floor_timestamp(dt, bucket)
-            grouped[bucket_dt] += 1 if metric_idx is None else _safe_float(row[metric_idx])
+            grouped[bucket_dt] += (
+                1 if metric_idx is None else _safe_float(row[metric_idx])
+            )
             parsed_rows += 1
 
         if not grouped:
@@ -3015,11 +3448,21 @@ class MasterOfParserGUI:
         if _vnd and _vnd != "(todos)":
             _fparts.append(f"vendor={_vnd}")
         for _ff, _fv in (
-            (self._analysis_filter1_field_var.get().strip(), self._analysis_filter1_value_var.get().strip()),
-            (self._analysis_filter2_field_var.get().strip(), self._analysis_filter2_value_var.get().strip()),
+            (
+                self._analysis_filter1_field_var.get().strip(),
+                self._analysis_filter1_value_var.get().strip(),
+            ),
+            (
+                self._analysis_filter2_field_var.get().strip(),
+                self._analysis_filter2_value_var.get().strip(),
+            ),
         ):
             if _ff and _ff != _NO_FILTER_FIELD and _fv:
-                _op = "≠" if _fv.startswith("!") else ("=" if _fv.startswith("=") else "≈")
+                _op = (
+                    "≠"
+                    if _fv.startswith("!")
+                    else ("=" if _fv.startswith("=") else "≈")
+                )
                 _fparts.append(f"{_ff}{_op}{_fv.lstrip('!=').strip()}")
         if self._pivot_ioc_only_var.get():
             _fparts.append("solo IOC")
@@ -3028,7 +3471,9 @@ class MasterOfParserGUI:
         title_line = f"Histograma temporal — {metric}  [{bucket.lower()}s]"
         if _subtitle:
             title_line += f"\n{_subtitle}"
-        ax.set_title(title_line, fontsize=10 if _subtitle else 11, pad=8, color="#222222")
+        ax.set_title(
+            title_line, fontsize=10 if _subtitle else 11, pad=8, color="#222222"
+        )
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._status_var.set(
@@ -3041,7 +3486,9 @@ class MasterOfParserGUI:
             messagebox.showwarning("Sin datos", "Carga primero un CSV para analizarlo.")
             return
         if "timestamp" not in self._csv_columns:
-            messagebox.showerror("Sin timestamp", "El CSV no contiene la columna 'timestamp'.")
+            messagebox.showerror(
+                "Sin timestamp", "El CSV no contiene la columna 'timestamp'."
+            )
             return
 
         bucket = self._hist_bucket_var.get()
@@ -3055,22 +3502,32 @@ class MasterOfParserGUI:
         from_value = self._hist_from_var.get().strip()
         to_value = self._hist_to_var.get().strip()
 
-        if series_field != _NO_SERIES_FIELD and not self._field_exists_for_analysis(series_field):
-            messagebox.showerror("Campo no disponible", f"La serie '{series_field}' no existe.")
+        if series_field != _NO_SERIES_FIELD and not self._field_exists_for_analysis(
+            series_field
+        ):
+            messagebox.showerror(
+                "Campo no disponible", f"La serie '{series_field}' no existe."
+            )
             return
 
         if from_value and self._parse_time_bound(from_value) is None:
-            messagebox.showerror("Fecha inválida", "No se pudo interpretar la fecha 'Desde'.")
+            messagebox.showerror(
+                "Fecha inválida", "No se pudo interpretar la fecha 'Desde'."
+            )
             return
         if to_value and self._parse_time_bound(to_value, is_end=True) is None:
-            messagebox.showerror("Fecha inválida", "No se pudo interpretar la fecha 'Hasta'.")
+            messagebox.showerror(
+                "Fecha inválida", "No se pudo interpretar la fecha 'Hasta'."
+            )
             return
 
         metric_idx = None
         if metric != "Recuento":
             metric_name = metric.replace("Suma ", "")
             if metric_name not in self._csv_columns:
-                messagebox.showerror("Métrica no disponible", f"No existe la columna '{metric_name}'.")
+                messagebox.showerror(
+                    "Métrica no disponible", f"No existe la columna '{metric_name}'."
+                )
                 return
             metric_idx = self._csv_columns.index(metric_name)
 
@@ -3086,7 +3543,9 @@ class MasterOfParserGUI:
             to_value=to_value,
         )
         if not rows:
-            messagebox.showwarning("Sin datos", "No hay filas que cumplan los filtros seleccionados.")
+            messagebox.showwarning(
+                "Sin datos", "No hay filas que cumplan los filtros seleccionados."
+            )
             return
 
         timestamp_idx = self._csv_columns.index("timestamp")
@@ -3110,7 +3569,10 @@ class MasterOfParserGUI:
             parsed_rows += 1
 
         if not grouped:
-            messagebox.showwarning("Sin serie temporal", "No hay timestamps válidos tras aplicar los filtros.")
+            messagebox.showwarning(
+                "Sin serie temporal",
+                "No hay timestamps válidos tras aplicar los filtros.",
+            )
             return
 
         series_names = [name for name, _ in series_totals.most_common()]
@@ -3140,15 +3602,25 @@ class MasterOfParserGUI:
         grand_total = sum(series_totals[name] for name in series_names) or 1
         for name in series_names:
             total_value = series_totals[name]
-            disp = f"{total_value:,.0f}" if total_value == int(total_value) else f"{total_value:,.1f}"
-            tree.insert("", "end", values=(name, disp, f"{(total_value / grand_total) * 100:.1f}%"))
+            disp = (
+                f"{total_value:,.0f}"
+                if total_value == int(total_value)
+                else f"{total_value:,.1f}"
+            )
+            tree.insert(
+                "",
+                "end",
+                values=(name, disp, f"{(total_value / grand_total) * 100:.1f}%"),
+            )
 
         if self._hist_canvas_mpl is not None:
             self._hist_fig.clear()
             ax = self._hist_fig.add_subplot(111)
             x_pos = list(range(len(labels)))
             pretty_labels = [_truncate_label(label, 22) for label in labels]
-            colors = (_CHART_COLORS * ((len(series_names) // len(_CHART_COLORS)) + 1))[: len(series_names)]
+            colors = (_CHART_COLORS * ((len(series_names) // len(_CHART_COLORS)) + 1))[
+                : len(series_names)
+            ]
 
             if len(series_names) == 1:
                 values = series_matrix[series_names[0]]
@@ -3157,14 +3629,23 @@ class MasterOfParserGUI:
                 bottoms = [0.0] * len(labels)
                 for idx, name in enumerate(series_names):
                     values = series_matrix[name]
-                    ax.bar(x_pos, values, bottom=bottoms, color=colors[idx], width=0.82, label=_truncate_label(name, 24))
+                    ax.bar(
+                        x_pos,
+                        values,
+                        bottom=bottoms,
+                        color=colors[idx],
+                        width=0.82,
+                        label=_truncate_label(name, 24),
+                    )
                     bottoms = [bottoms[i] + values[i] for i in range(len(values))]
                 ax.legend(fontsize=8, ncol=2, loc="upper left")
 
             self._style_axis(ax, value_axis="y")
             step = max(1, len(labels) // 18)
             ax.set_xticks(x_pos[::step])
-            ax.set_xticklabels(pretty_labels[::step], rotation=38, ha="right", fontsize=8)
+            ax.set_xticklabels(
+                pretty_labels[::step], rotation=38, ha="right", fontsize=8
+            )
             ax.set_ylabel(metric, fontsize=9)
             subtitle = self._build_filter_subtitle(
                 vendor_filter,
@@ -3181,7 +3662,9 @@ class MasterOfParserGUI:
                 title += f" · serie={series_field}"
             title += f" — {metric}"
             if subtitle:
-                ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+                ax.set_title(
+                    f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222"
+                )
             else:
                 ax.set_title(title, fontsize=11, pad=10, color="#222222")
             self._hist_fig.tight_layout()
@@ -3307,6 +3790,12 @@ Flujo recomendado:
         action="store_true",
         help="Incluir la columna raw_event con la línea original completa (más pesado)",
     )
+    parser.add_argument(
+        "--forti-src-zone-mode",
+        choices=["ssid", "interface"],
+        default="ssid",
+        help="Cómo normalizar src_zone en Fortinet: ssid (WiFi) o interface (srcintf)",
+    )
     args = parser.parse_args()
 
     # ── Validar entrada ───────────────────────────────────────────────────────
@@ -3358,6 +3847,7 @@ Flujo recomendado:
     print(f"[+] Líneas:    {total_lines:,}")
     if args.raw_event:
         print("[+] raw_event: activado (salida más pesada)")
+    print(f"[+] Forti src_zone: {args.forti_src_zone_mode}")
 
     # ── Parsear ───────────────────────────────────────────────────────────────
     parsed = 0
@@ -3390,6 +3880,8 @@ Flujo recomendado:
             if not record:
                 skipped += 1
                 continue
+
+            record = unify_cim_record(record, args.forti_src_zone_mode)
 
             vendor_name = record.get("vendor", "(sin_vendor)")
             vendor_counts[vendor_name] += 1
