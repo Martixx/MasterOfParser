@@ -173,6 +173,7 @@ FORTINET_TO_CIM = {
 CIM_COLUMNS = [
     # ── Tiempo ─────────────────────────────────────────────────────────────
     "timestamp",
+    "timestamp_date",
     # ── Dispositivo ────────────────────────────────────────────────────────
     "dvc",
     "dvc_serial",
@@ -729,6 +730,7 @@ _ANALYSIS_VENDOR_OPTIONS = ["(todos)", "Palo Alto Networks", "Fortinet", "Cisco"
 _PIVOT_FIELDS = [
     "vendor",
     "timestamp",
+    "timestamp_date",
     "action",
     "action_source",
     "rule",
@@ -928,6 +930,13 @@ def unify_cim_record(record: dict, forti_src_zone_mode: str = "ssid") -> dict:
         inbound_interface = str(record.get("inbound_interface", "") or "").strip()
         if inbound_interface:
             record["src_zone"] = inbound_interface
+
+    # Fecha derivada para análisis/export sin componente horaria.
+    timestamp_value = str(record.get("timestamp", "") or "").strip()
+    if timestamp_value and not str(record.get("timestamp_date", "") or "").strip():
+        parsed_ts = _parse_timestamp(timestamp_value)
+        if parsed_ts is not None:
+            record["timestamp_date"] = parsed_ts.strftime("%Y-%m-%d")
 
     # Si faltan los totales, derivarlos de in/out para mantener consistencia CIM.
     if not str(record.get("bytes_total", "") or "").strip():
@@ -3924,7 +3933,7 @@ Flujo recomendado:
 
     # ── Resumen ───────────────────────────────────────────────────────────────
     print()
-    print("─" * 50)
+    print("-" * 50)
     print(f"[+] Procesados: {parsed + skipped:,}")
     print(f"[+] Exportados: {parsed:,} registros CIM")
     print(f"[+] Ignorados:  {skipped:,} líneas (formato no reconocido)")
@@ -3940,7 +3949,7 @@ Flujo recomendado:
         )
         print(f"[+] IOC por fuente: {summary_ioc_vendor}")
     print(f"[+] Salida:     {output_file}")
-    print("─" * 50)
+    print("-" * 50)
 
 
 if __name__ == "__main__":
