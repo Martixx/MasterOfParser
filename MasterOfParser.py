@@ -1385,6 +1385,9 @@ class MasterOfParserGUI:
             text="→ Análisis",
             command=self._send_results_filters_to_analysis,
         ).pack(side="left", padx=(4, 0))
+        ttk.Button(ctrl, text="Columnas…", command=self._open_column_selector).pack(
+            side="left", padx=(6, 0)
+        )
 
         chips_row = ttk.Frame(tab)
         chips_row.pack(fill="x", padx=8, pady=(0, 6))
@@ -1408,6 +1411,9 @@ class MasterOfParserGUI:
         # Menú contextual botón derecho
         self._ctx_menu = tk.Menu(self._tree, tearoff=0)
         self._tree.bind("<Button-3>", self._on_tree_rclick)
+        self._tree.bind("<ButtonPress-1>", self._on_tree_left_press, add="+")
+        self._tree.bind("<B1-Motion>", self._on_tree_left_drag, add="+")
+        self._tree.bind("<ButtonRelease-1>", self._on_tree_left_release, add="+")
 
         # Barra de estado
         self._status_var = tk.StringVar(value="Sin datos cargados")
@@ -1418,6 +1424,11 @@ class MasterOfParserGUI:
         self._all_rows: list = []
         self._csv_columns: list = []
         self._display_columns: list = []
+        self._hidden_columns: set[str] = set()
+        self._header_drag_col: str = ""
+        self._header_drag_start_x: int = 0
+        self._header_drag_active: bool = False
+        self._suppress_sort_once: bool = False
         self._sort_col: str = ""
         self._sort_asc: bool = True
         self._results_filters: list[dict] = []
@@ -1720,6 +1731,7 @@ class MasterOfParserGUI:
 
             self._csv_columns = cols
             self._display_columns = list(cols)
+            self._hidden_columns = set()
             self._all_rows = rows
             self._sort_col = ""
             self._sort_asc = True
@@ -1780,11 +1792,22 @@ class MasterOfParserGUI:
         tree.delete(*tree.get_children())
         tree["columns"] = cols
 
-        if self._display_columns and set(self._display_columns) == set(cols):
-            tree["displaycolumns"] = self._display_columns
-        else:
-            self._display_columns = list(cols)
-            tree["displaycolumns"] = cols
+        desired_display = [
+            col
+            for col in self._display_columns
+            if col in cols and col not in self._hidden_columns
+        ]
+        desired_display += [
+            col
+            for col in cols
+            if col not in self._hidden_columns and col not in desired_display
+        ]
+        if not desired_display and cols:
+            desired_display = [cols[0]]
+            self._hidden_columns = set(cols[1:])
+
+        self._display_columns = list(desired_display)
+        tree["displaycolumns"] = tuple(self._display_columns)
 
         for col in cols:
             tree.heading(col, text=col, command=lambda c=col: self._sort_by(c))
@@ -2115,6 +2138,127 @@ class MasterOfParserGUI:
         )
         self._tree["displaycolumns"] = self._display_columns
 
+    def _open_column_selector(self):
+        """Selector para mostrar/ocultar columnas visibles en Resultados."""
+        if not self._csv_columns:
+            messagebox.showinfo("Sin datos", "Carga primero un CSV de resultados.")
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title("Columnas visibles")
+        popup.transient(self.root)
+        popup.resizable(False, False)
+
+        body = ttk.Frame(popup, padding=8)
+        body.pack(fill="both", expand=True)
+
+        vars_map: dict[str, tk.BooleanVar] = {}
+        for col in self._csv_columns:
+            is_visible = col in self._display_columns and col not in self._hidden_columns
+            var = tk.BooleanVar(value=is_visible)
+            vars_map[col] = var
+            ttk.Checkbutton(body, text=col, variable=var).pack(anchor="w")
+
+        btns = ttk.Frame(popup, padding=(8, 0, 8, 8))
+        btns.pack(fill="x")
+
+        def show_all():
+            for var in vars_map.values():
+                var.set(True)
+
+        def hide_all():
+            for var in vars_map.values():
+                var.set(False)
+
+        def apply_changes():
+            selected = [col for col, var in vars_map.items() if var.get()]
+            if not selected:
+                messagebox.showwarning(
+                    "Selección inválida", "Debes dejar al menos una columna visible."
+                )
+                return
+
+            selected_set = set(selected)
+            self._hidden_columns = {
+                col for col in self._csv_columns if col not in selected_set
+            }
+            ordered = [col for col in self._display_columns if col in selected_set]
+            ordered += [
+                col for col in self._csv_columns if col in selected_set and col not in ordered
+            ]
+            self._display_columns = ordered
+            self._tree["displaycolumns"] = tuple(self._display_columns)
+            popup.destroy()
+
+        ttk.Button(btns, text="Mostrar todo", command=show_all).pack(side="left")
+        ttk.Button(btns, text="Ocultar todo", command=hide_all).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btns, text="Cancelar", command=popup.destroy).pack(side="right")
+        ttk.Button(btns, text="Aplicar", command=apply_changes).pack(
+            side="right", padx=4
+        )
+
+        popup.grab_set()
+
+    def _on_tree_left_press(self, event):
+        if self._tree.identify_region(event.x, event.y) != "heading":
+            self._header_drag_col = ""
+            self._header_drag_active = False
+            return
+
+        col_id = self._tree.identify_column(event.x)
+        try:
+            col_idx = int(col_id.lstrip("#")) - 1
+        except ValueError:
+            self._header_drag_col = ""
+            self._header_drag_active = False
+            return
+
+        display_cols = list(self._tree["displaycolumns"])
+        if col_idx < 0 or col_idx >= len(display_cols):
+            self._header_drag_col = ""
+            self._header_drag_active = False
+            return
+
+        self._header_drag_col = display_cols[col_idx]
+        self._header_drag_start_x = event.x
+        self._header_drag_active = False
+
+    def _on_tree_left_drag(self, event):
+        if not self._header_drag_col:
+            return
+        if abs(event.x - self._header_drag_start_x) >= 12:
+            self._header_drag_active = True
+
+    def _on_tree_left_release(self, event):
+        if not self._header_drag_col:
+            return
+
+        try:
+            if self._header_drag_active:
+                target_col_id = self._tree.identify_column(event.x)
+                target_idx = int(target_col_id.lstrip("#")) - 1
+                display_cols = list(self._tree["displaycolumns"])
+                if not display_cols:
+                    return
+                target_idx = max(0, min(target_idx, len(display_cols) - 1))
+                src_idx = display_cols.index(self._header_drag_col)
+                if src_idx != target_idx:
+                    moved_col = display_cols.pop(src_idx)
+                    display_cols.insert(target_idx, moved_col)
+                    self._display_columns = display_cols
+                    self._tree["displaycolumns"] = tuple(display_cols)
+                    self._suppress_sort_once = True
+                    return "break"
+        except (ValueError, tk.TclError):
+            pass
+        finally:
+            self._header_drag_col = ""
+            self._header_drag_active = False
+
+        return None
+
     def _send_results_filters_to_analysis(self):
         vendor_filter = "(todos)"
         non_vendor_filters = []
@@ -2171,6 +2315,9 @@ class MasterOfParserGUI:
         self._nb.select(self._tab_analysis)
 
     def _sort_by(self, col: str):
+        if self._suppress_sort_once:
+            self._suppress_sort_once = False
+            return
         if col not in self._csv_columns:
             return
         idx = self._csv_columns.index(col)
