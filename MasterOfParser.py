@@ -1417,6 +1417,7 @@ class MasterOfParserGUI:
 
         self._all_rows: list = []
         self._csv_columns: list = []
+        self._display_columns: list = []
         self._sort_col: str = ""
         self._sort_asc: bool = True
         self._results_filters: list[dict] = []
@@ -1718,6 +1719,7 @@ class MasterOfParserGUI:
                     rows.append([row.get(c, "") for c in cols])
 
             self._csv_columns = cols
+            self._display_columns = list(cols)
             self._all_rows = rows
             self._sort_col = ""
             self._sort_asc = True
@@ -1777,9 +1779,24 @@ class MasterOfParserGUI:
         tree = self._tree
         tree.delete(*tree.get_children())
         tree["columns"] = cols
+
+        if self._display_columns and set(self._display_columns) == set(cols):
+            tree["displaycolumns"] = self._display_columns
+        else:
+            self._display_columns = list(cols)
+            tree["displaycolumns"] = cols
+
         for col in cols:
             tree.heading(col, text=col, command=lambda c=col: self._sort_by(c))
-            tree.column(col, width=max(len(col) * 8, 80), minwidth=60, stretch=False)
+            if col == "raw_event":
+                tree.column(col, width=1200, minwidth=300, stretch=True)
+            else:
+                tree.column(
+                    col,
+                    width=max(len(col) * 8, 80),
+                    minwidth=60,
+                    stretch=False,
+                )
         for row in rows:
             tree.insert("", "end", values=row)
 
@@ -2065,6 +2082,15 @@ class MasterOfParserGUI:
                 label=f"Análisis → Agrupar por: {col_name}",
                 command=lambda: self._send_to_analysis_group(col_name),
             )
+            m.add_separator()
+            m.add_command(
+                label=f"Mover columna a la izquierda: {col_name}",
+                command=lambda: self._move_result_column(col_name, -1),
+            )
+            m.add_command(
+                label=f"Mover columna a la derecha: {col_name}",
+                command=lambda: self._move_result_column(col_name, 1),
+            )
 
         if m.index("end") is not None:
             m.tk_popup(event.x_root, event.y_root)
@@ -2074,6 +2100,20 @@ class MasterOfParserGUI:
         self._results_filters.append({"field": col_name, "value": value})
         self._render_result_filter_chips()
         self._apply_filter()
+
+    def _move_result_column(self, col_name: str, direction: int):
+        """Reordena columnas visibles en Resultados."""
+        if col_name not in self._display_columns:
+            return
+        idx = self._display_columns.index(col_name)
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(self._display_columns):
+            return
+        self._display_columns[idx], self._display_columns[new_idx] = (
+            self._display_columns[new_idx],
+            self._display_columns[idx],
+        )
+        self._tree["displaycolumns"] = self._display_columns
 
     def _send_results_filters_to_analysis(self):
         vendor_filter = "(todos)"
