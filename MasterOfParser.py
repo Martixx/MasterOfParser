@@ -2780,10 +2780,30 @@ class MasterOfParserGUI:
 
         ttk.Label(ctrl, text="Desde:").pack(anchor="w")
         self._hist_from_var = tk.StringVar()
-        ttk.Entry(ctrl, textvariable=self._hist_from_var).pack(fill="x", pady=(0, 4))
+        hist_from_row = ttk.Frame(ctrl)
+        hist_from_row.pack(fill="x", pady=(0, 4))
+        ttk.Entry(hist_from_row, textvariable=self._hist_from_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(
+            hist_from_row,
+            text="📅",
+            width=3,
+            command=lambda: self._open_calendar_popup(self._hist_from_var),
+        ).pack(side="left", padx=(4, 0))
         ttk.Label(ctrl, text="Hasta:").pack(anchor="w")
         self._hist_to_var = tk.StringVar()
-        ttk.Entry(ctrl, textvariable=self._hist_to_var).pack(fill="x", pady=(0, 8))
+        hist_to_row = ttk.Frame(ctrl)
+        hist_to_row.pack(fill="x", pady=(0, 8))
+        ttk.Entry(hist_to_row, textvariable=self._hist_to_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(
+            hist_to_row,
+            text="📅",
+            width=3,
+            command=lambda: self._open_calendar_popup(self._hist_to_var),
+        ).pack(side="left", padx=(4, 0))
         ttk.Label(
             ctrl, text="Formato: YYYY-MM-DD o YYYY-MM-DD HH:MM", foreground="#777777"
         ).pack(anchor="w", pady=(0, 8))
