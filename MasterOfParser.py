@@ -880,9 +880,13 @@ def _parse_timestamp(raw_value: str) -> datetime | None:
 
     for fmt in _TIMESTAMP_FORMATS:
         try:
-            parsed = datetime.strptime(text, fmt)
             if fmt == "%b %d %H:%M:%S":
-                parsed = parsed.replace(year=datetime.now().year)
+                current_year = datetime.now().year
+                parsed = datetime.strptime(
+                    f"{text} {current_year}", "%b %d %H:%M:%S %Y"
+                )
+            else:
+                parsed = datetime.strptime(text, fmt)
             return parsed
         except ValueError:
             continue
