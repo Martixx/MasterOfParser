@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 
 try:
     import pandas as pd
+
     _HAS_PANDAS = True
 except ImportError:
     _HAS_PANDAS = False
@@ -1248,6 +1249,12 @@ _ANOMALY_METRICS = ["Recuento", "Suma bytes_total", "Suma bytes_in", "Suma bytes
 _CHART_TYPES = [
     "Barras horizontales",
     "Barras verticales",
+    "Barras apiladas (H)",
+    "Barras apiladas (V)",
+    "Heatmap",
+    "Radar",
+    "Sunburst",
+    "Treemap",
     "Quesito (pie)",
     "Donut",
     "Línea",
@@ -1410,14 +1417,30 @@ def unify_cim_record(record: dict, forti_src_zone_mode: str = "ssid") -> dict:
         "dest_zone": ["dest_zone", "DestinationZone", "dstintf", "outbound_interface"],
         "src_host": ["src_host", "SrcHostname", "srcname", "hostname"],
         "dest_host": ["dest_host", "DstHostname", "dstname"],
-        "src_country": ["src_country", "srccountry", "SrcCountry", "SourceCountry", "ioc_src_country"],
-        "dest_country": ["dest_country", "dstcountry", "DstCountry", "DestinationCountry", "ioc_dst_country"],
+        "src_country": [
+            "src_country",
+            "srccountry",
+            "SrcCountry",
+            "SourceCountry",
+            "ioc_src_country",
+        ],
+        "dest_country": [
+            "dest_country",
+            "dstcountry",
+            "DstCountry",
+            "DestinationCountry",
+            "ioc_dst_country",
+        ],
         "user": ["user", "usrName", "SourceUser", "SrcUser", "srcuser", "xauthuser"],
         "rule": ["rule", "RuleName", "policyname", "policy_name"],
         "rule_uuid": ["rule_uuid", "RuleUUID", "poluuid"],
         "event_category": ["event_category", "cat", "Category"],
         "severity": ["severity", "VendorSeverity", "severity_level"],
-        "attack_direction": ["attack_direction", "DirectionOfAttack", "direction_of_attack"],
+        "attack_direction": [
+            "attack_direction",
+            "DirectionOfAttack",
+            "direction_of_attack",
+        ],
     }
     for canonical_key, candidates in alias_candidates.items():
         if not str(record.get(canonical_key, "") or "").strip():
@@ -1471,7 +1494,9 @@ def unify_cim_record(record: dict, forti_src_zone_mode: str = "ssid") -> dict:
         action_normalized = action_map[action_raw]
     elif (is_threat or is_ips or is_url) and not action_raw:
         action_normalized = "alert"
-    elif not action_raw and not (is_threat or is_ips or is_url) and subtype == "traffic":
+    elif (
+        not action_raw and not (is_threat or is_ips or is_url) and subtype == "traffic"
+    ):
         action_normalized = "allow"
     else:
         action_normalized = None
@@ -1537,11 +1562,15 @@ def unify_cim_record(record: dict, forti_src_zone_mode: str = "ssid") -> dict:
 
     # --- Totales de tráfico ---
     if not str(record.get("bytes_total", "") or "").strip():
-        bytes_total = _safe_int(record.get("bytes_in")) + _safe_int(record.get("bytes_out"))
+        bytes_total = _safe_int(record.get("bytes_in")) + _safe_int(
+            record.get("bytes_out")
+        )
         if bytes_total > 0:
             record["bytes_total"] = str(bytes_total)
     if not str(record.get("packets_total", "") or "").strip():
-        packets_total = _safe_int(record.get("packets_in")) + _safe_int(record.get("packets_out"))
+        packets_total = _safe_int(record.get("packets_in")) + _safe_int(
+            record.get("packets_out")
+        )
         if packets_total > 0:
             record["packets_total"] = str(packets_total)
 
@@ -1652,8 +1681,12 @@ class MasterOfParserGUI:
         self._stop_requested = threading.Event()
         self._analysis_refresh_after_id = None
         self._hist_refresh_after_id = None
-        self._analysis_zoom_stack: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        self._hist_zoom_stack: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        self._analysis_zoom_stack: list[
+            tuple[tuple[float, float], tuple[float, float]]
+        ] = []
+        self._hist_zoom_stack: list[tuple[tuple[float, float], tuple[float, float]]] = (
+            []
+        )
 
         # ── Header con logo inline ───────────────────────────────────────────
         header = tk.Frame(root, bg="#1a1a1a", height=44)
@@ -1916,8 +1949,12 @@ class MasterOfParserGUI:
         ttk.Label(row, text="Relacionar IOCs", width=20, anchor="w").pack(side="left")
         self._ioc_src_var = tk.BooleanVar(value=True)
         self._ioc_dst_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row, text="src_ip (origen)", variable=self._ioc_src_var).pack(side="left", padx=4)
-        ttk.Checkbutton(row, text="dest_ip (destino)", variable=self._ioc_dst_var).pack(side="left", padx=4)
+        ttk.Checkbutton(row, text="src_ip (origen)", variable=self._ioc_src_var).pack(
+            side="left", padx=4
+        )
+        ttk.Checkbutton(row, text="dest_ip (destino)", variable=self._ioc_dst_var).pack(
+            side="left", padx=4
+        )
 
         ttk.Separator(tab, orient="horizontal").pack(fill="x", padx=8, pady=6)
 
@@ -2071,6 +2108,13 @@ class MasterOfParserGUI:
         self._sort_col: str = ""
         self._sort_asc: bool = True
         self._results_filters: list[dict] = []
+        # Datos exportables del último gráfico / histograma
+        self._last_pivot_labels: list = []
+        self._last_pivot_values: list = []
+        self._last_pivot_meta: dict = {}
+        self._last_hist_result: dict = {}
+        # Carpeta de sesión para exportaciones
+        self._session_folder: str = ""
         self._render_result_filter_chips()
 
     # ── Selectores de fichero ────────────────────────────────────────────────
@@ -2249,7 +2293,9 @@ class MasterOfParserGUI:
             qradar_delim = ","
             if qradar_result:
                 qradar_cols, qradar_delim = qradar_result
-                log(f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)")
+                log(
+                    f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)"
+                )
                 payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
             else:
                 log("[+] Formato:   raw syslog (una línea = un evento)")
@@ -2328,7 +2374,10 @@ class MasterOfParserGUI:
                     if ioc_src:
                         record.update(
                             enrich_ioc_candidates(
-                                [record.get("src_ip", ""), record.get("src_ip_nat", "")],
+                                [
+                                    record.get("src_ip", ""),
+                                    record.get("src_ip_nat", ""),
+                                ],
                                 ioc_set,
                                 ioc_map,
                                 "src",
@@ -2338,7 +2387,10 @@ class MasterOfParserGUI:
                     if ioc_dst:
                         record.update(
                             enrich_ioc_candidates(
-                                [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
+                                [
+                                    record.get("dest_ip", ""),
+                                    record.get("dest_ip_nat", ""),
+                                ],
                                 ioc_set,
                                 ioc_map,
                                 "dst",
@@ -2346,16 +2398,8 @@ class MasterOfParserGUI:
                             )
                         )
 
-                    src_hit = (
-                        record.get("ioc_src") == "YES"
-                        if ioc_src
-                        else False
-                    )
-                    dst_hit = (
-                        record.get("ioc_dst") == "YES"
-                        if ioc_dst
-                        else False
-                    )
+                    src_hit = record.get("ioc_src") == "YES" if ioc_src else False
+                    dst_hit = record.get("ioc_dst") == "YES" if ioc_dst else False
                     has_ioc = src_hit or dst_hit
                     if has_ioc:
                         ioc_hits += 1
@@ -2499,10 +2543,18 @@ class MasterOfParserGUI:
         def _read():
             try:
                 fname = os.path.basename(path)
-                self.root.after(0, lambda: self._set_global_progress(10, f"Leyendo CSV... ({fname})"))
+                self.root.after(
+                    0,
+                    lambda: self._set_global_progress(10, f"Leyendo CSV... ({fname})"),
+                )
                 if _HAS_PANDAS:
-                    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str,
-                                      keep_default_na=False, low_memory=False)
+                    df = pd.read_csv(
+                        path,
+                        encoding="utf-8-sig",
+                        dtype=str,
+                        keep_default_na=False,
+                        low_memory=False,
+                    )
                     cols = df.columns.tolist()
                     rows = df.values.tolist()
                 else:
@@ -2514,10 +2566,13 @@ class MasterOfParserGUI:
                             rows.append([row.get(c, "") for c in cols])
                 self.root.after(0, lambda: self._finish_csv_load(path, cols, rows))
             except Exception as exc:
-                self.root.after(0, lambda: (
-                    self._finish_global_progress("Error cargando CSV."),
-                    messagebox.showerror("Error cargando CSV", str(exc))
-                ))
+                self.root.after(
+                    0,
+                    lambda: (
+                        self._finish_global_progress("Error cargando CSV."),
+                        messagebox.showerror("Error cargando CSV", str(exc)),
+                    ),
+                )
 
         threading.Thread(target=_read, daemon=True).start()
 
@@ -2556,13 +2611,22 @@ class MasterOfParserGUI:
         self._hist_filter2_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
         if self._pivot_col_var.get() not in analysis_fields:
             self._pivot_col_var.set(analysis_fields[0] if analysis_fields else "")
-        if self._pivot_secondary_col_var.get() not in self._pivot_secondary_col_cb["values"]:
+        if (
+            self._pivot_secondary_col_var.get()
+            not in self._pivot_secondary_col_cb["values"]
+        ):
             self._pivot_secondary_col_var.set(_NO_SECONDARY_FIELD)
         if self._hist_series_col_var.get() not in self._hist_series_col_cb["values"]:
             self._hist_series_col_var.set(_NO_SERIES_FIELD)
-        if self._hist_filter1_field_var.get() not in self._hist_filter1_field_cb["values"]:
+        if (
+            self._hist_filter1_field_var.get()
+            not in self._hist_filter1_field_cb["values"]
+        ):
             self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
-        if self._hist_filter2_field_var.get() not in self._hist_filter2_field_cb["values"]:
+        if (
+            self._hist_filter2_field_var.get()
+            not in self._hist_filter2_field_cb["values"]
+        ):
             self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
         self._status_var.set(
             f"{len(rows):,} filas  |  {len(cols)} columnas  |  {os.path.basename(path)}"
@@ -2618,7 +2682,9 @@ class MasterOfParserGUI:
         self._tree_batch_idx = end
         if end < len(rows):
             pct = int(end * 100 / len(rows))
-            self._set_global_progress(pct, f"Cargando tabla... {pct}% ({end:,}/{len(rows):,})")
+            self._set_global_progress(
+                pct, f"Cargando tabla... {pct}% ({end:,}/{len(rows):,})"
+            )
             self.root.after(1, self._insert_tree_batch)
         else:
             self._tree_batch_rows = None
@@ -3133,9 +3199,15 @@ class MasterOfParserGUI:
 
         if _HAS_PANDAS and self._df is not None:
             numeric = pd.to_numeric(self._df[col], errors="coerce")
-            sort_col = numeric.fillna(float("inf")) if self._sort_asc else numeric.fillna(float("-inf"))
+            sort_col = (
+                numeric.fillna(float("inf"))
+                if self._sort_asc
+                else numeric.fillna(float("-inf"))
+            )
             if numeric.isna().all():
-                self._df = self._df.sort_values(by=col, ascending=self._sort_asc, key=lambda s: s.str.lower())
+                self._df = self._df.sort_values(
+                    by=col, ascending=self._sort_asc, key=lambda s: s.str.lower()
+                )
             else:
                 order = sort_col.argsort()
                 if not self._sort_asc:
@@ -3363,9 +3435,9 @@ class MasterOfParserGUI:
         ttk.Button(ctrl, text="⚡  Forzar refresco", command=self._generate_pivot).pack(
             fill="x", pady=(4, 0)
         )
-        ttk.Button(ctrl, text="💾  Exportar imagen…", command=self._export_chart).pack(
-            fill="x", pady=(4, 0)
-        )
+        ttk.Button(
+            ctrl, text="💾  Exportar (imagen + CSV)", command=self._export_chart
+        ).pack(fill="x", pady=(4, 0))
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
 
         ttk.Label(ctrl, text="Anomalías temporales:", font=("", 9, "bold")).pack(
@@ -3614,7 +3686,9 @@ class MasterOfParserGUI:
             self._fig = Figure(figsize=(8.8, 5.2), dpi=110, facecolor="#ffffff")
             self._canvas_mpl = FigureCanvasTkAgg(self._fig, master=chart_frame)
             self._canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
-            self._canvas_mpl.mpl_connect("button_press_event", self._on_analysis_dblclick)
+            self._canvas_mpl.mpl_connect(
+                "button_press_event", self._on_analysis_dblclick
+            )
         else:
             self._canvas_mpl = None
             ttk.Label(
@@ -3803,7 +3877,7 @@ class MasterOfParserGUI:
             ctrl, text="⚡  Forzar refresco", command=self._generate_histogram_view
         ).pack(fill="x", pady=(4, 0))
         ttk.Button(
-            ctrl, text="💾  Exportar imagen…", command=self._export_hist_chart
+            ctrl, text="💾  Exportar (imagen + CSV)", command=self._export_hist_chart
         ).pack(fill="x", pady=(4, 0))
 
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
@@ -3838,7 +3912,9 @@ class MasterOfParserGUI:
                 self._hist_fig, master=chart_frame
             )
             self._hist_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
-            self._hist_canvas_mpl.mpl_connect("button_press_event", self._on_hist_dblclick)
+            self._hist_canvas_mpl.mpl_connect(
+                "button_press_event", self._on_hist_dblclick
+            )
         else:
             self._hist_canvas_mpl = None
             ttk.Label(
@@ -4030,28 +4106,33 @@ class MasterOfParserGUI:
         cell_value = self._get_row_value(row, field_name).lower()
 
         # Detectar OR (case-insensitive)
-        or_parts = re.split(r'\s+OR\s+', raw_value, flags=re.IGNORECASE)
+        or_parts = re.split(r"\s+OR\s+", raw_value, flags=re.IGNORECASE)
         if len(or_parts) > 1:
             for part in or_parts:
-                and_parts = re.split(r'\s+AND\s+', part.strip(), flags=re.IGNORECASE)
-                if all(self._check_single_condition(c.strip(), cell_value) for c in and_parts):
+                and_parts = re.split(r"\s+AND\s+", part.strip(), flags=re.IGNORECASE)
+                if all(
+                    self._check_single_condition(c.strip(), cell_value)
+                    for c in and_parts
+                ):
                     return True
             return False
 
         # Detectar AND (case-insensitive)
-        and_parts = re.split(r'\s+AND\s+', raw_value, flags=re.IGNORECASE)
+        and_parts = re.split(r"\s+AND\s+", raw_value, flags=re.IGNORECASE)
         if len(and_parts) > 1:
-            return all(self._check_single_condition(c.strip(), cell_value) for c in and_parts)
+            return all(
+                self._check_single_condition(c.strip(), cell_value) for c in and_parts
+            )
 
         return self._check_single_condition(raw_value, cell_value)
-    
+
     def _check_single_condition(self, raw_value: str, cell_value: str) -> bool:
         """Evalúa una condición simple (sin OR)."""
         exact = raw_value.startswith("=")
         exclude = raw_value.startswith("!")
         cmp_value = raw_value[1:].strip() if (exact or exclude) else raw_value
         cmp_value = cmp_value.lower()
-        
+
         if exact:
             return cell_value == cmp_value
         if exclude:
@@ -4289,7 +4370,9 @@ class MasterOfParserGUI:
                 agg[key] += 1
             if idx % 2000 == 0:
                 pct = min(90, int((idx * 90) / total_rows))
-                self._set_global_progress(pct, f"Generando gráfico de análisis... {pct}%")
+                self._set_global_progress(
+                    pct, f"Generando gráfico de análisis... {pct}%"
+                )
                 self.root.update_idletasks()
 
         sorted_items = sorted(agg.items(), key=lambda x: x[1], reverse=True)
@@ -4303,6 +4386,21 @@ class MasterOfParserGUI:
         labels = [it[0] for it in sorted_items]
         values = [it[1] for it in sorted_items]
         total = sum(values) or 1
+
+        # Guardar datos para exportación
+        self._last_pivot_labels = labels
+        self._last_pivot_values = values
+        self._last_pivot_meta = {
+            "col": col,
+            "secondary_col": secondary_col if use_secondary else None,
+            "metric": metric_label,
+            "subtitle": _subtitle,
+            "ioc_only": self._pivot_ioc_only_var.get(),
+            "vendor_filter": self._analysis_vendor_var.get().strip(),
+            "from_value": self._analysis_from_var.get().strip(),
+            "to_value": self._analysis_to_var.get().strip(),
+            "stacked": False,
+        }
 
         # ── Actualizar tabla pivot ────────────────────────────────────────────
         tree = self._pivot_tree
@@ -4348,15 +4446,123 @@ class MasterOfParserGUI:
 
         # ── Dibujar gráfico ───────────────────────────────────────────────────
         if self._canvas_mpl is not None:
-            chart_title = col if secondary_idx is None else f"{col} / {secondary_col}"
-            self._draw_chart(
-                chart_labels,
-                values,
-                chart_title,
-                metric_label,
-                self._pivot_chart_var.get(),
-                subtitle=_subtitle,
-            )
+            _chart_type = self._pivot_chart_var.get()
+            _NEEDS_MATRIX = {
+                "Barras apiladas (H)",
+                "Barras apiladas (V)",
+                "Heatmap",
+                "Radar",
+                "Sunburst",
+            }
+
+            if _chart_type in _NEEDS_MATRIX and secondary_idx is not None:
+                # Construir matriz: primary → {secondary → value}
+                primary_totals: dict[str, float] = defaultdict(float)
+                sec_totals: dict[str, float] = defaultdict(float)
+                for (pv, sv), val in agg.items():
+                    primary_totals[pv] += val
+                    sec_totals[sv] += val
+                # Ordenar primarios por total descendente
+                sorted_primaries = sorted(
+                    primary_totals.items(), key=lambda x: x[1], reverse=True
+                )
+                if not self._pivot_topn_all.get():
+                    try:
+                        topn = int(self._pivot_topn_var.get())
+                    except ValueError:
+                        topn = 15
+                    sorted_primaries = sorted_primaries[:topn]
+                stacked_primary_labels = [p[0] for p in sorted_primaries]
+
+                # Secundarios ordenados por total descendente
+                sorted_secs = sorted(
+                    sec_totals.items(), key=lambda x: x[1], reverse=True
+                )
+                stacked_secondary_labels = [s[0] for s in sorted_secs]
+
+                # Construir matriz
+                stacked_matrix: dict[str, list[float]] = {}
+                for s_name in stacked_secondary_labels:
+                    stacked_matrix[s_name] = [
+                        agg.get((p, s_name), 0.0) for p in stacked_primary_labels
+                    ]
+
+                # Guardar datos para exportación
+                self._last_pivot_meta["stacked"] = True
+                self._last_pivot_meta["stacked_primary"] = stacked_primary_labels
+                self._last_pivot_meta["stacked_secondary"] = stacked_secondary_labels
+                self._last_pivot_meta["stacked_matrix"] = stacked_matrix
+
+                if _chart_type in ("Barras apiladas (H)", "Barras apiladas (V)"):
+                    self._draw_stacked_chart(
+                        stacked_primary_labels,
+                        stacked_secondary_labels,
+                        stacked_matrix,
+                        col,
+                        secondary_col,
+                        metric_label,
+                        _chart_type,
+                        subtitle=_subtitle,
+                    )
+                elif _chart_type == "Heatmap":
+                    self._draw_heatmap(
+                        stacked_primary_labels,
+                        stacked_secondary_labels,
+                        stacked_matrix,
+                        col,
+                        secondary_col,
+                        metric_label,
+                        subtitle=_subtitle,
+                    )
+                elif _chart_type == "Radar":
+                    self._draw_radar(
+                        stacked_primary_labels,
+                        stacked_secondary_labels,
+                        stacked_matrix,
+                        col,
+                        secondary_col,
+                        metric_label,
+                        subtitle=_subtitle,
+                    )
+                elif _chart_type == "Sunburst":
+                    self._draw_sunburst(
+                        stacked_primary_labels,
+                        stacked_secondary_labels,
+                        stacked_matrix,
+                        col,
+                        secondary_col,
+                        metric_label,
+                        subtitle=_subtitle,
+                    )
+            elif _chart_type in _NEEDS_MATRIX and secondary_idx is None:
+                messagebox.showinfo(
+                    "Necesitas desglosar",
+                    f"El gráfico '{_chart_type}' necesita un campo en 'Desglosar por'.\n"
+                    "Selecciona un campo secundario y regenera.",
+                )
+            elif _chart_type == "Treemap":
+                chart_title = (
+                    col if secondary_idx is None else f"{col} / {secondary_col}"
+                )
+                self._draw_treemap(
+                    chart_labels,
+                    values,
+                    chart_title,
+                    metric_label,
+                    subtitle=_subtitle,
+                )
+            else:
+                chart_title = (
+                    col if secondary_idx is None else f"{col} / {secondary_col}"
+                )
+                self._draw_chart(
+                    chart_labels,
+                    values,
+                    chart_title,
+                    metric_label,
+                    _chart_type,
+                    subtitle=_subtitle,
+                )
 
         self._nb.select(self._tab_analysis)
         self._finish_global_progress("Gráfico de análisis listo (100%).")
@@ -4529,6 +4735,7 @@ class MasterOfParserGUI:
 
         elif chart_type == "Quesito (pie)":
             import math
+
             wedge = {"edgecolor": "white", "linewidth": 1.2}
             wedges, autotexts = ax.pie(
                 values,
@@ -4561,6 +4768,7 @@ class MasterOfParserGUI:
 
         elif chart_type == "Donut":
             import math
+
             wedge = {"width": 0.42, "edgecolor": "white", "linewidth": 1.2}
             wedges, autotexts = ax.pie(
                 values,
@@ -4628,6 +4836,407 @@ class MasterOfParserGUI:
         if hasattr(self, "_analysis_zoom_back_btn"):
             self._analysis_zoom_back_btn.configure(state="disabled")
 
+    def _draw_stacked_chart(
+        self,
+        primary_labels: list[str],
+        secondary_labels: list[str],
+        matrix: dict[str, list[float]],
+        col: str,
+        secondary_col: str,
+        metric: str,
+        chart_type: str,
+        subtitle: str = "",
+    ):
+        """Barras apiladas: primary = cada barra, secondary = segmentos de color."""
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        n = len(primary_labels)
+        pretty_primary = [_truncate_label(l, 34) for l in primary_labels]
+        colors = (_CHART_COLORS * ((len(secondary_labels) // len(_CHART_COLORS)) + 1))[
+            : len(secondary_labels)
+        ]
+
+        horizontal = chart_type == "Barras apiladas (H)"
+
+        if horizontal:
+            positions = list(range(n))
+            lefts = [0.0] * n
+            for s_idx, s_name in enumerate(secondary_labels):
+                vals = matrix[s_name]
+                ax.barh(
+                    positions,
+                    vals,
+                    left=lefts,
+                    color=colors[s_idx],
+                    label=s_name,
+                    height=0.78,
+                )
+                lefts = [l + v for l, v in zip(lefts, vals)]
+            self._style_axis(ax, value_axis="x")
+            ax.set_yticks(positions)
+            ax.set_yticklabels(pretty_primary, fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel(metric, fontsize=9)
+            # Totales al final de cada barra
+            for i, tot in enumerate(lefts):
+                ax.text(
+                    tot, i, f"  {tot:,.0f}", va="center", fontsize=7, color="#333333"
+                )
+        else:  # vertical
+            positions = list(range(n))
+            bottoms = [0.0] * n
+            for s_idx, s_name in enumerate(secondary_labels):
+                vals = matrix[s_name]
+                ax.bar(
+                    positions,
+                    vals,
+                    bottom=bottoms,
+                    color=colors[s_idx],
+                    label=s_name,
+                    width=0.78,
+                )
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+            self._style_axis(ax, value_axis="y")
+            ax.set_xticks(positions)
+            ax.set_xticklabels(pretty_primary, rotation=38, ha="right", fontsize=8)
+            ax.set_ylabel(metric, fontsize=9)
+            for i, tot in enumerate(bottoms):
+                ax.text(
+                    i,
+                    tot,
+                    f"{tot:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    color="#333333",
+                )
+
+        leg = ax.legend(fontsize=7, loc="best", framealpha=0.85)
+        leg.set_draggable(True)
+
+        title = f"{col}  por  {secondary_col}  —  {metric}"
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._fig.tight_layout()
+        self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
+
+    def _draw_heatmap(
+        self,
+        primary_labels: list[str],
+        secondary_labels: list[str],
+        matrix: dict[str, list[float]],
+        col: str,
+        secondary_col: str,
+        metric: str,
+        subtitle: str = "",
+    ):
+        """Mapa de calor: filas = primario, columnas = secundario, color = valor."""
+        import numpy as np
+
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        n_rows = len(primary_labels)
+        n_cols = len(secondary_labels)
+        data = np.zeros((n_rows, n_cols))
+        for c_idx, s_name in enumerate(secondary_labels):
+            vals = matrix.get(s_name, [0.0] * n_rows)
+            for r_idx in range(n_rows):
+                data[r_idx, c_idx] = vals[r_idx] if r_idx < len(vals) else 0.0
+
+        im = ax.imshow(data, aspect="auto", cmap="YlOrRd", interpolation="nearest")
+        self._fig.colorbar(im, ax=ax, label=metric, shrink=0.8)
+
+        ax.set_xticks(range(n_cols))
+        ax.set_xticklabels(
+            [_truncate_label(s, 18) for s in secondary_labels],
+            rotation=45,
+            ha="right",
+            fontsize=7,
+        )
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels(
+            [_truncate_label(p, 30) for p in primary_labels],
+            fontsize=7,
+        )
+
+        # Anotar valores en celdas (si no son demasiadas)
+        if n_rows * n_cols <= 400:
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    v = data[r, c]
+                    if v > 0:
+                        txt_color = "white" if v > data.max() * 0.6 else "#222222"
+                        ax.text(
+                            c,
+                            r,
+                            f"{v:,.0f}",
+                            ha="center",
+                            va="center",
+                            fontsize=6,
+                            color=txt_color,
+                        )
+
+        title = f"{col}  ×  {secondary_col}  —  {metric}"
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._fig.tight_layout()
+        self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
+
+    def _draw_radar(
+        self,
+        primary_labels: list[str],
+        secondary_labels: list[str],
+        matrix: dict[str, list[float]],
+        col: str,
+        secondary_col: str,
+        metric: str,
+        subtitle: str = "",
+    ):
+        """Radar / araña: cada primario es una línea, ejes = secundarios."""
+        import numpy as np
+
+        self._fig.clear()
+        n_axes = len(secondary_labels)
+        if n_axes < 3:
+            messagebox.showwarning(
+                "Pocos ejes",
+                "El gráfico Radar necesita al menos 3 valores en el campo desglosar.",
+            )
+            return
+        # Limitar primarios para legibilidad
+        max_series = 8
+        if len(primary_labels) > max_series:
+            primary_labels = primary_labels[:max_series]
+
+        angles = np.linspace(0, 2 * np.pi, n_axes, endpoint=False).tolist()
+        angles += angles[:1]  # cerrar polígono
+
+        ax = self._fig.add_subplot(111, polar=True)
+        colors = (_CHART_COLORS * ((len(primary_labels) // len(_CHART_COLORS)) + 1))[
+            : len(primary_labels)
+        ]
+
+        for p_idx, p_name in enumerate(primary_labels):
+            vals = [
+                matrix.get(s, [0.0] * len(primary_labels))[p_idx]
+                for s in secondary_labels
+            ]
+            vals += vals[:1]  # cerrar
+            ax.plot(
+                angles,
+                vals,
+                "o-",
+                linewidth=1.5,
+                label=_truncate_label(p_name, 24),
+                color=colors[p_idx],
+                markersize=3,
+            )
+            ax.fill(angles, vals, alpha=0.08, color=colors[p_idx])
+
+        ax.set_thetagrids(
+            [a * 180 / np.pi for a in angles[:-1]],
+            [_truncate_label(s, 16) for s in secondary_labels],
+            fontsize=7,
+        )
+        ax.tick_params(axis="y", labelsize=6)
+
+        leg = ax.legend(
+            fontsize=7, loc="upper right", bbox_to_anchor=(1.3, 1.1), framealpha=0.85
+        )
+        leg.set_draggable(True)
+
+        title = f"{col}  por  {secondary_col}  —  {metric}"
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=18, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=18, color="#222222")
+        self._fig.tight_layout()
+        self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
+
+    def _draw_sunburst(
+        self,
+        primary_labels: list[str],
+        secondary_labels: list[str],
+        matrix: dict[str, list[float]],
+        col: str,
+        secondary_col: str,
+        metric: str,
+        subtitle: str = "",
+    ):
+        """Sunburst: anillo interior = primario, anillo exterior = secundario."""
+        import math
+
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+
+        # Anillo interior: totales por primario
+        primary_totals = []
+        for p_idx, p_name in enumerate(primary_labels):
+            total = sum(
+                matrix.get(s, [0.0] * len(primary_labels))[p_idx]
+                for s in secondary_labels
+            )
+            primary_totals.append(total)
+        grand_total = sum(primary_totals) or 1
+        n_pri = len(primary_labels)
+        pri_colors = (_CHART_COLORS * ((n_pri // len(_CHART_COLORS)) + 1))[:n_pri]
+
+        # Anillo exterior: cada (primario, secundario) como segmento
+        outer_values = []
+        outer_colors = []
+        outer_labels_list = []
+        for p_idx, p_name in enumerate(primary_labels):
+            base_r, base_g, base_b = (
+                int(pri_colors[p_idx][1:3], 16),
+                int(pri_colors[p_idx][3:5], 16),
+                int(pri_colors[p_idx][5:7], 16),
+            )
+            sec_vals = []
+            for s_name in secondary_labels:
+                v = matrix.get(s_name, [0.0] * len(primary_labels))[p_idx]
+                if v > 0:
+                    sec_vals.append((s_name, v))
+            for s_i, (s_name, v) in enumerate(sec_vals):
+                factor = 0.7 + 0.3 * (s_i / max(len(sec_vals), 1))
+                shade = "#{:02x}{:02x}{:02x}".format(
+                    min(255, int(base_r * factor + 255 * (1 - factor))),
+                    min(255, int(base_g * factor + 255 * (1 - factor))),
+                    min(255, int(base_b * factor + 255 * (1 - factor))),
+                )
+                outer_values.append(v)
+                outer_colors.append(shade)
+                outer_labels_list.append(f"{_truncate_label(s_name, 14)}")
+
+        # Dibujar anillo interior
+        wedges_inner, _ = ax.pie(
+            primary_totals,
+            colors=pri_colors,
+            radius=0.7,
+            wedgeprops={"width": 0.35, "edgecolor": "white", "linewidth": 1.2},
+            startangle=90,
+        )
+        # Anotaciones interiores
+        for i, (w, label) in enumerate(zip(wedges_inner, primary_labels)):
+            pct = primary_totals[i] / grand_total * 100
+            if pct < 2:
+                continue
+            ang = (w.theta2 + w.theta1) / 2
+            x = 0.52 * math.cos(math.radians(ang))
+            y = 0.52 * math.sin(math.radians(ang))
+            ax.text(
+                x,
+                y,
+                f"{_truncate_label(label, 16)}\n{pct:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="#222222",
+            )
+
+        # Dibujar anillo exterior
+        if outer_values:
+            wedges_outer, _ = ax.pie(
+                outer_values,
+                colors=outer_colors,
+                radius=1.0,
+                wedgeprops={"width": 0.28, "edgecolor": "white", "linewidth": 0.8},
+                startangle=90,
+            )
+            # Anotaciones exteriores (solo las significativas)
+            for i, w in enumerate(wedges_outer):
+                pct = outer_values[i] / grand_total * 100
+                if pct < 1.5:
+                    continue
+                ang = (w.theta2 + w.theta1) / 2
+                x = math.cos(math.radians(ang))
+                y = math.sin(math.radians(ang))
+                ha = "left" if x >= 0 else "right"
+                ax.annotate(
+                    f"{outer_labels_list[i]} ({pct:.1f}%)",
+                    xy=(0.88 * x, 0.88 * y),
+                    xytext=(1.25 * x, 1.18 * y),
+                    ha=ha,
+                    va="center",
+                    fontsize=6,
+                    arrowprops=dict(
+                        arrowstyle="-",
+                        color="#999999",
+                        lw=0.6,
+                        connectionstyle="arc3,rad=0.1" if x >= 0 else "arc3,rad=-0.1",
+                    ),
+                )
+
+        ax.set_aspect("equal")
+        title = f"{col}  →  {secondary_col}  —  {metric}"
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._fig.tight_layout()
+        self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
+
+    def _draw_treemap(
+        self,
+        labels: list,
+        values: list,
+        col: str,
+        metric: str,
+        subtitle: str = "",
+    ):
+        """Treemap — requiere squarify (pip install squarify)."""
+        try:
+            import squarify
+        except ImportError:
+            messagebox.showwarning(
+                "squarify no instalado",
+                "Para usar Treemap necesitas:\n  pip install squarify",
+            )
+            return
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        n = len(labels)
+        colors = (_CHART_COLORS * ((n // len(_CHART_COLORS)) + 1))[:n]
+        total = sum(values) or 1
+        display_labels = [
+            f"{_truncate_label(l, 28)}\n{v:,.0f} ({v / total * 100:.1f}%)"
+            for l, v in zip(labels, values)
+        ]
+        squarify.plot(
+            sizes=values,
+            label=display_labels,
+            color=colors,
+            alpha=0.85,
+            ax=ax,
+            text_kwargs={"fontsize": 7, "color": "#222222"},
+        )
+        ax.axis("off")
+        title = f"{col}  —  {metric}"
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._fig.tight_layout()
+        self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
+
     def _draw_time_series(
         self,
         labels: list,
@@ -4677,7 +5286,8 @@ class MasterOfParserGUI:
             pad=10,
             color="#222222",
         )
-        ax.legend(fontsize=8)
+        leg = ax.legend(fontsize=8)
+        leg.set_draggable(True)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -4975,6 +5585,7 @@ class MasterOfParserGUI:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _finish_histogram_render(self, result: dict):
+        self._last_hist_result = result  # Guardar para exportación
         bucket = result["bucket"]
         metric = result["metric"]
         series_field = result["series_field"]
@@ -5035,10 +5646,11 @@ class MasterOfParserGUI:
                         bottom=bottoms,
                         color=colors[idx],
                         width=0.82,
-                        label=_truncate_label(name, 24),
+                        label=name,
                     )
                     bottoms = [bottoms[i] + values[i] for i in range(len(values))]
-                ax.legend(fontsize=8, ncol=2, loc="upper left")
+                leg = ax.legend(fontsize=7, ncol=2, loc="upper left")
+                leg.set_draggable(True)
 
             self._style_axis(ax, value_axis="y")
             step = max(1, len(labels) // 18)
@@ -5067,6 +5679,7 @@ class MasterOfParserGUI:
                 )
             else:
                 ax.set_title(title, fontsize=11, pad=10, color="#222222")
+
             self._hist_fig.tight_layout()
             self._hist_canvas_mpl.draw()
             self._hist_zoom_stack.clear()
@@ -5138,6 +5751,27 @@ class MasterOfParserGUI:
             self._hist_zoom_back_btn.configure(state="disabled")
         self._hist_canvas_mpl.draw_idle()
 
+    def _get_session_folder(self) -> str:
+        """Devuelve (y crea si no existe) la carpeta de sesión para exportaciones."""
+        if not self._session_folder:
+            today = datetime.now().strftime("%Y%m%d")
+            base = (
+                os.path.dirname(self._loaded_csv_path)
+                if self._loaded_csv_path
+                else os.getcwd()
+            )
+            self._session_folder = os.path.join(base, f"MasterOfParser_{today}")
+        os.makedirs(self._session_folder, exist_ok=True)
+        return self._session_folder
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        """Convierte un título en nombre de fichero seguro."""
+        name = re.sub(r'[<>:"/\\|?*\n]', "_", name)
+        name = re.sub(r"\s+", "_", name.strip())
+        name = re.sub(r"_+", "_", name).strip("_")
+        return name[:120] or "export"
+
     def _export_hist_chart(self):
         if not _HAS_MPL or self._hist_canvas_mpl is None:
             messagebox.showwarning("Sin gráfico", "Genera primero un histograma.")
@@ -5145,23 +5779,87 @@ class MasterOfParserGUI:
         if not self._hist_fig.get_axes():
             messagebox.showwarning("Sin gráfico", "Genera primero un histograma.")
             return
-        path = filedialog.asksaveasfilename(
-            title="Exportar histograma",
-            defaultextension=".png",
-            filetypes=[
-                ("PNG (alta calidad)", "*.png"),
-                ("PDF vectorial", "*.pdf"),
-                ("SVG vectorial", "*.svg"),
-                ("JPEG", "*.jpg"),
-            ],
-        )
-        if not path:
-            return
         try:
-            self._hist_fig.savefig(path, dpi=150, bbox_inches="tight")
-            messagebox.showinfo("Exportado", f"Histograma guardado en:\n{path}")
+            result = self._last_hist_result
+            bucket = result.get("bucket", "histograma")
+            series_field = result.get("series_field", "")
+            metric = result.get("metric", "")
+            base_name = f"hist_{bucket}"
+            if series_field and series_field != _NO_SERIES_FIELD:
+                base_name += f"_{series_field}"
+            base_name += f"_{metric}"
+            # Añadir contexto de filtros al nombre
+            if result.get("ioc_only"):
+                base_name += "_IOC"
+            vnd = result.get("vendor_filter", "")
+            if vnd and vnd != "(todos)":
+                base_name += f"_{vnd}"
+            if result.get("from_value"):
+                base_name += f"_desde{result['from_value']}"
+            if result.get("to_value"):
+                base_name += f"_hasta{result['to_value']}"
+            base_name = self._safe_filename(base_name)
+            timestamp = datetime.now().strftime("%H%M%S")
+            base_name = f"{base_name}_{timestamp}"
+
+            folder = os.path.join(self._get_session_folder(), "histogramas")
+            os.makedirs(folder, exist_ok=True)
+
+            # Imagen
+            img_path = os.path.join(folder, f"{base_name}.png")
+            self._hist_fig.savefig(img_path, dpi=150, bbox_inches="tight")
+
+            # CSV con series (totales)
+            csv_path = os.path.join(folder, f"{base_name}.csv")
+            series_names = result.get("series_names", [])
+            labels = result.get("labels", [])
+            series_matrix = result.get("series_matrix", {})
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["periodo"] + series_names)
+                for idx_b, label in enumerate(labels):
+                    row = [label] + [
+                        (
+                            series_matrix.get(name, [0])[idx_b]
+                            if idx_b < len(series_matrix.get(name, []))
+                            else 0
+                        )
+                        for name in series_names
+                    ]
+                    writer.writerow(row)
+
+            # CSV con porcentajes
+            pct_csv_path = os.path.join(folder, f"{base_name}_pct.csv")
+            with open(pct_csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["periodo"] + [f"{n} (%)" for n in series_names])
+                for idx_b, label in enumerate(labels):
+                    row_vals = [
+                        (
+                            series_matrix.get(name, [0])[idx_b]
+                            if idx_b < len(series_matrix.get(name, []))
+                            else 0
+                        )
+                        for name in series_names
+                    ]
+                    bucket_total = sum(row_vals) or 1
+                    row = [label] + [f"{v / bucket_total * 100:.1f}" for v in row_vals]
+                    writer.writerow(row)
+
+            messagebox.showinfo(
+                "Exportado",
+                f"Histograma guardado en:\n{img_path}\n\n"
+                f"Datos (totales):\n{csv_path}\n\n"
+                f"Datos (%):\n{pct_csv_path}",
+            )
         except Exception as exc:
-            messagebox.showerror("Error al exportar", str(exc))
+            import traceback
+
+            traceback.print_exc()
+            messagebox.showerror(
+                "Error al exportar histograma",
+                f"{type(exc).__name__}: {exc}",
+            )
 
     def _export_chart(self):
         if not _HAS_MPL or self._canvas_mpl is None:
@@ -5170,23 +5868,106 @@ class MasterOfParserGUI:
         if not self._fig.get_axes():
             messagebox.showwarning("Sin gráfico", "Genera primero un gráfico.")
             return
-        path = filedialog.asksaveasfilename(
-            title="Exportar gráfico",
-            defaultextension=".png",
-            filetypes=[
-                ("PNG (alta calidad)", "*.png"),
-                ("PDF vectorial", "*.pdf"),
-                ("SVG vectorial", "*.svg"),
-                ("JPEG", "*.jpg"),
-            ],
-        )
-        if not path:
-            return
         try:
-            self._fig.savefig(path, dpi=150, bbox_inches="tight")
-            messagebox.showinfo("Exportado", f"Gráfico guardado en:\n{path}")
+            meta = self._last_pivot_meta
+            col = meta.get("col", "grafico")
+            secondary = meta.get("secondary_col")
+            metric = meta.get("metric", "Recuento")
+            base_name = f"{col}"
+            if secondary:
+                base_name += f"_{secondary}"
+            base_name += f"_{metric}"
+            # Añadir contexto de filtros al nombre
+            if meta.get("ioc_only"):
+                base_name += "_IOC"
+            vnd = meta.get("vendor_filter", "")
+            if vnd and vnd != "(todos)":
+                base_name += f"_{vnd}"
+            if meta.get("from_value"):
+                base_name += f"_desde{meta['from_value']}"
+            if meta.get("to_value"):
+                base_name += f"_hasta{meta['to_value']}"
+            base_name = self._safe_filename(base_name)
+            timestamp = datetime.now().strftime("%H%M%S")
+            base_name = f"{base_name}_{timestamp}"
+
+            folder = os.path.join(self._get_session_folder(), "graficas")
+            os.makedirs(folder, exist_ok=True)
+
+            # Imagen
+            img_path = os.path.join(folder, f"{base_name}.png")
+            self._fig.savefig(img_path, dpi=150, bbox_inches="tight")
+
+            # CSV con tabla pivot
+            csv_path = os.path.join(folder, f"{base_name}.csv")
+            if meta.get("stacked"):
+                # Formato matriz: filas = primarios, columnas = secundarios
+                s_pri = meta.get("stacked_primary", [])
+                s_sec = meta.get("stacked_secondary", [])
+                s_mat = meta.get("stacked_matrix", {})
+                with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([col] + s_sec + ["TOTAL"])
+                    for p_idx, p_name in enumerate(s_pri):
+                        row_vals = [
+                            s_mat.get(s, [0.0] * len(s_pri))[p_idx] for s in s_sec
+                        ]
+                        writer.writerow([p_name] + row_vals + [sum(row_vals)])
+                # CSV porcentajes
+                pct_csv_path = os.path.join(folder, f"{base_name}_pct.csv")
+                with open(pct_csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([col] + [f"{s} (%)" for s in s_sec])
+                    for p_idx, p_name in enumerate(s_pri):
+                        row_vals = [
+                            s_mat.get(s, [0.0] * len(s_pri))[p_idx] for s in s_sec
+                        ]
+                        row_total = sum(row_vals) or 1
+                        writer.writerow(
+                            [p_name] + [f"{v / row_total * 100:.1f}" for v in row_vals]
+                        )
+                messagebox.showinfo(
+                    "Exportado",
+                    f"Gráfico guardado en:\n{img_path}\n\n"
+                    f"Datos (totales):\n{csv_path}\n\n"
+                    f"Datos (%):\n{pct_csv_path}",
+                )
+            else:
+                labels = self._last_pivot_labels
+                values = self._last_pivot_values
+                total = sum(values) or 1
+                with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    if secondary:
+                        writer.writerow([col, secondary, metric, "% total"])
+                        for lbl, val in zip(labels, values):
+                            primary_v, secondary_v = (
+                                lbl if isinstance(lbl, tuple) else (lbl, "")
+                            )
+                            writer.writerow(
+                                [
+                                    primary_v,
+                                    secondary_v,
+                                    val,
+                                    f"{val / total * 100:.1f}%",
+                                ]
+                            )
+                    else:
+                        writer.writerow([col, metric, "% total"])
+                        for lbl, val in zip(labels, values):
+                            writer.writerow([lbl, val, f"{val / total * 100:.1f}%"])
+                messagebox.showinfo(
+                    "Exportado",
+                    f"Gráfico guardado en:\n{img_path}\n\nDatos CSV:\n{csv_path}",
+                )
         except Exception as exc:
-            messagebox.showerror("Error al exportar", str(exc))
+            import traceback
+
+            traceback.print_exc()
+            messagebox.showerror(
+                "Error al exportar gráfico",
+                f"{type(exc).__name__}: {exc}",
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5340,7 +6121,9 @@ Flujo recomendado:
     qradar_delim = ","
     if qradar_result:
         qradar_cols, qradar_delim = qradar_result
-        print(f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)")
+        print(
+            f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)"
+        )
         payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
     else:
         print("[+] Formato:   raw syslog (una línea = un evento)")
@@ -5434,16 +6217,8 @@ Flujo recomendado:
                     )
                 )
 
-            src_hit = (
-                record.get("ioc_src") == "YES"
-                if not args.no_ioc_src
-                else False
-            )
-            dst_hit = (
-                record.get("ioc_dst") == "YES"
-                if not args.no_ioc_dst
-                else False
-            )
+            src_hit = record.get("ioc_src") == "YES" if not args.no_ioc_src else False
+            dst_hit = record.get("ioc_dst") == "YES" if not args.no_ioc_dst else False
             has_ioc = src_hit or dst_hit
             if has_ioc:
                 ioc_hits += 1
