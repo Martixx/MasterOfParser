@@ -1935,6 +1935,10 @@ class MasterOfParserGUI:
         self._tree.bind("<B1-Motion>", self._on_tree_left_drag, add="+")
         self._tree.bind("<ButtonRelease-1>", self._on_tree_left_release, add="+")
 
+        # Barra de progreso de carga CSV
+        self._csv_progress = ttk.Progressbar(tab, mode="indeterminate")
+        self._csv_progress.pack(fill="x", padx=8, pady=(0, 2))
+
         # Barra de estado
         self._status_var = tk.StringVar(value="Sin datos cargados")
         ttk.Label(tab, textvariable=self._status_var, anchor="w").pack(
@@ -2274,20 +2278,16 @@ class MasterOfParserGUI:
         self.root.after(100, self._poll)
 
     def _on_tab_changed(self, _event=None):
-        """Al cambiar a Resultados, carga el CSV parseado si no está ya cargado."""
+        """Al cambiar de pestaña, carga el CSV parseado si aún no está cargado."""
         selected = self._nb.select()
-        if selected == str(self._tab_results):
+        # Auto-cargar CSV en cualquier pestaña que lo necesite (Resultados, Análisis, Histogramas)
+        if selected != str(self._tab_parser):
             if (
                 self._last_output
                 and os.path.isfile(self._last_output)
                 and self._last_output != self._loaded_csv_path
             ):
                 self._load_csv(self._last_output)
-        elif selected == str(self._tab_analysis):
-            self._on_analysis_change()
-        elif selected == str(self._tab_histograms):
-            self._ensure_default_hist_overview()
-            self._on_hist_change()
 
     def _ensure_default_hist_overview(self):
         """Configura vista general por defecto en Histogramas cuando aún no hay gráfico."""
@@ -2305,7 +2305,7 @@ class MasterOfParserGUI:
         self._hist_filter1_value_var.set("")
         self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
         self._hist_filter2_value_var.set("")
-        self._hist_bucket_var.set("Hora")
+        self._hist_bucket_var.set("Día")
         self._hist_metric_var.set("Recuento")
         self._hist_topn_var.set("8")
         self._hist_topn_all.set(False)
@@ -2326,76 +2326,68 @@ class MasterOfParserGUI:
             )
         if not path or not os.path.isfile(path):
             return
-        try:
-            rows = []
-            with open(path, encoding="utf-8-sig", errors="replace") as f:
-                reader = csv.DictReader(f)
-                cols = list(reader.fieldnames or [])
-                for row in reader:
-                    rows.append([row.get(c, "") for c in cols])
 
-            self._loaded_csv_path = path
-            self._csv_columns = cols
-            self._display_columns = list(cols)
-            self._hidden_columns = set()
-            self._all_rows = rows
-            self._sort_col = ""
-            self._sort_asc = True
-            self._setup_tree(cols, rows)
-            self._filter_col_cb["values"] = ["(todas)"] + cols
-            self._filter_col_var.set("(todas)")
-            self._filter_var.set("")
-            self._results_from_var.set("")
-            self._results_to_var.set("")
-            self._results_filters = []
-            self._render_result_filter_chips()
-            # Actualizar combobox de columnas en la pestaña Análisis
-            extra = [c for c in cols if c not in _PIVOT_FIELDS]
-            analysis_fields = _DERIVED_ANALYSIS_FIELDS + _PIVOT_FIELDS + extra
-            self._pivot_col_cb["values"] = analysis_fields
-            self._pivot_secondary_col_cb["values"] = [
-                _NO_SECONDARY_FIELD
-            ] + analysis_fields
-            self._analysis_filter1_field_cb["values"] = [
-                _NO_FILTER_FIELD
-            ] + analysis_fields
-            self._analysis_filter2_field_cb["values"] = [
-                _NO_FILTER_FIELD
-            ] + analysis_fields
-            self._hist_series_col_cb["values"] = [_NO_SERIES_FIELD] + analysis_fields
-            self._hist_filter1_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
-            self._hist_filter2_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
-            if self._pivot_col_var.get() not in analysis_fields:
-                self._pivot_col_var.set(analysis_fields[0] if analysis_fields else "")
-            if (
-                self._pivot_secondary_col_var.get()
-                not in self._pivot_secondary_col_cb["values"]
-            ):
-                self._pivot_secondary_col_var.set(_NO_SECONDARY_FIELD)
-            if (
-                self._hist_series_col_var.get()
-                not in self._hist_series_col_cb["values"]
-            ):
-                self._hist_series_col_var.set(_NO_SERIES_FIELD)
-            if (
-                self._hist_filter1_field_var.get()
-                not in self._hist_filter1_field_cb["values"]
-            ):
-                self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
-            if (
-                self._hist_filter2_field_var.get()
-                not in self._hist_filter2_field_cb["values"]
-            ):
-                self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
-            self._status_var.set(
-                f"{len(rows):,} filas  |  {len(cols)} columnas  |  {os.path.basename(path)}"
-            )
+        self._status_var.set(f"Cargando {os.path.basename(path)}…")
+        self._csv_progress.start(10)
 
-            if self._nb.select() == str(self._tab_histograms):
-                self._ensure_default_hist_overview()
-                self._on_hist_change()
-        except Exception as exc:
-            messagebox.showerror("Error cargando CSV", str(exc))
+        def _read():
+            try:
+                rows = []
+                with open(path, encoding="utf-8-sig", errors="replace") as f:
+                    reader = csv.DictReader(f)
+                    cols = list(reader.fieldnames or [])
+                    for row in reader:
+                        rows.append([row.get(c, "") for c in cols])
+                self.root.after(0, lambda: self._finish_csv_load(path, cols, rows))
+            except Exception as exc:
+                self.root.after(0, lambda: (
+                    self._csv_progress.stop(),
+                    messagebox.showerror("Error cargando CSV", str(exc))
+                ))
+
+        threading.Thread(target=_read, daemon=True).start()
+
+    def _finish_csv_load(self, path: str, cols: list, rows: list):
+        self._csv_progress.stop()
+        self._loaded_csv_path = path
+        self._last_output = path  # compartir con todas las pestañas
+        self._csv_columns = cols
+        self._display_columns = list(cols)
+        self._hidden_columns = set()
+        self._all_rows = rows
+        self._sort_col = ""
+        self._sort_asc = True
+        self._setup_tree(cols, rows)
+        self._filter_col_cb["values"] = ["(todas)"] + cols
+        self._filter_col_var.set("(todas)")
+        self._filter_var.set("")
+        self._results_from_var.set("")
+        self._results_to_var.set("")
+        self._results_filters = []
+        self._render_result_filter_chips()
+        # Actualizar comboboxes en Análisis e Histogramas
+        extra = [c for c in cols if c not in _PIVOT_FIELDS]
+        analysis_fields = _DERIVED_ANALYSIS_FIELDS + _PIVOT_FIELDS + extra
+        self._pivot_col_cb["values"] = analysis_fields
+        self._pivot_secondary_col_cb["values"] = [_NO_SECONDARY_FIELD] + analysis_fields
+        self._analysis_filter1_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
+        self._analysis_filter2_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
+        self._hist_series_col_cb["values"] = [_NO_SERIES_FIELD] + analysis_fields
+        self._hist_filter1_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
+        self._hist_filter2_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
+        if self._pivot_col_var.get() not in analysis_fields:
+            self._pivot_col_var.set(analysis_fields[0] if analysis_fields else "")
+        if self._pivot_secondary_col_var.get() not in self._pivot_secondary_col_cb["values"]:
+            self._pivot_secondary_col_var.set(_NO_SECONDARY_FIELD)
+        if self._hist_series_col_var.get() not in self._hist_series_col_cb["values"]:
+            self._hist_series_col_var.set(_NO_SERIES_FIELD)
+        if self._hist_filter1_field_var.get() not in self._hist_filter1_field_cb["values"]:
+            self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
+        if self._hist_filter2_field_var.get() not in self._hist_filter2_field_cb["values"]:
+            self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
+        self._status_var.set(
+            f"{len(rows):,} filas  |  {len(cols)} columnas  |  {os.path.basename(path)}"
+        )
 
     def _setup_tree(self, cols, rows):
         tree = self._tree
@@ -3385,7 +3377,7 @@ class MasterOfParserGUI:
                 foreground="gray",
             ).pack(expand=True)
 
-        self._setup_analysis_auto_refresh()
+        # self._setup_analysis_auto_refresh()  # Desactivado: solo bajo demanda
 
     def _build_histograms_tab(self):
         tab = self._tab_histograms
@@ -3478,7 +3470,7 @@ class MasterOfParserGUI:
         )
 
         ttk.Label(ctrl, text="Intervalo:").pack(anchor="w")
-        self._hist_bucket_var = tk.StringVar(value="Hora")
+        self._hist_bucket_var = tk.StringVar(value="Día")
         ttk.Combobox(
             ctrl,
             textvariable=self._hist_bucket_var,
@@ -3582,7 +3574,7 @@ class MasterOfParserGUI:
             fill="x", padx=8, pady=(0, 4)
         )
 
-        self._setup_hist_auto_refresh()
+        # self._setup_hist_auto_refresh()  # Desactivado: solo bajo demanda
 
     def _setup_analysis_auto_refresh(self):
         tracked_vars = [
