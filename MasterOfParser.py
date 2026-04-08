@@ -202,6 +202,19 @@ FORTINET_TO_CIM = {
 
 # Columnas CIM de salida (orden para Excel)
 CIM_COLUMNS = [
+    # ── QRadar (columnas del export TSV) ───────────────────────────────────
+    "source_network",
+    "qradar_event_name",
+    "qradar_log_source",
+    "qradar_category",
+    "qradar_src_ip",
+    "qradar_src_port",
+    "qradar_dest_ip",
+    "qradar_dest_port",
+    "qradar_dest_country",
+    "qradar_src_zone",
+    "qradar_src_asset",
+    "qradar_src_network_group",
     # ── Tiempo ─────────────────────────────────────────────────────────────
     "timestamp",
     "timestamp_date",
@@ -609,6 +622,61 @@ def parse_line(line: str) -> dict | None:
     if "%FTD-" in line and "Original IP payload:" in line:
         return parse_cisco_ftd_line(line)
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detección formato QRadar TSV
+# ─────────────────────────────────────────────────────────────────────────────
+_QRADAR_HEADER_MAP = {
+    "Hora inicio": None,  # timestamp se extrae del payload (más preciso)
+    "Nombre suceso": "qradar_event_name",
+    "Origen de registro": "qradar_log_source",
+    "Categor\u00eda nivel bajo": "qradar_category",
+    "IP de Origen": "qradar_src_ip",
+    "Puerto de origen": "qradar_src_port",
+    "Ip de destino": "qradar_dest_ip",
+    "Puerto destino": "qradar_dest_port",
+    "Pais destino": "qradar_dest_country",
+    "Source_Network": "source_network",
+    "Source zone": "qradar_src_zone",
+    "Nombre activo Origen": "qradar_src_asset",
+    "Grupo de red de origen": "qradar_src_network_group",
+}
+_QRADAR_PAYLOAD_COL = "Payload"
+
+
+def detect_qradar_tsv(path: str) -> tuple[list[str], str] | None:
+    """Lee la primera línea del fichero. Si contiene 'Payload' como cabecera,
+    devuelve (lista de cabeceras, delimitador). Si no, devuelve None (raw syslog).
+    Prueba primero coma, luego tab (coma genera más columnas en exports QRadar)."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        first_line = f.readline()
+    best = None
+    for delim in (",", "\t"):
+        cols = first_line.strip().split(delim)
+        if _QRADAR_PAYLOAD_COL in cols and len(cols) >= 5:
+            if best is None or len(cols) > len(best[0]):
+                best = (cols, delim)
+    return best
+
+
+def _split_qradar_line(line: str, ncols: int, delim: str) -> list[str]:
+    """Divide una línea QRadar respetando que el Payload (última columna) puede
+    contener el delimitador internamente (ej. comas dentro de LEEF)."""
+    # Partimos en ncols-1 splits: las primeras N-1 columnas + todo el resto es Payload
+    return line.split(delim, ncols - 1)
+
+
+def _extract_qradar_fields(tsv_cols: list[str], parts: list[str]) -> dict:
+    """Dado un split de una línea QRadar, devuelve dict con campos mapeados."""
+    extra: dict = {}
+    for i, col_name in enumerate(tsv_cols):
+        if i >= len(parts):
+            break
+        cim_name = _QRADAR_HEADER_MAP.get(col_name)
+        if cim_name:
+            extra[cim_name] = parts[i].strip()
+    return extra
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1086,6 +1154,13 @@ _NO_FILTER_FIELD = "(sin filtro)"
 _NO_SERIES_FIELD = "(total)"
 _ANALYSIS_VENDOR_OPTIONS = ["(todos)", "Palo Alto Networks", "Fortinet", "Cisco"]
 _PIVOT_FIELDS = [
+    "source_network",
+    "qradar_event_name",
+    "qradar_log_source",
+    "qradar_category",
+    "qradar_dest_country",
+    "qradar_src_zone",
+    "qradar_src_network_group",
     "vendor",
     "timestamp",
     "timestamp_date",
@@ -2121,6 +2196,17 @@ class MasterOfParserGUI:
                 log("[+] raw_event: activado (salida más pesada)")
             log(f"[+] Forti src_zone: {forti_src_zone_mode}")
 
+            # Detectar formato QRadar TSV
+            qradar_result = detect_qradar_tsv(log_file)
+            qradar_cols = None
+            qradar_delim = ","
+            if qradar_result:
+                qradar_cols, qradar_delim = qradar_result
+                log(f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)")
+                payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
+            else:
+                log("[+] Formato:   raw syslog (una línea = un evento)")
+
             parsed = 0
             skipped = 0
             ioc_hits = 0
@@ -2138,6 +2224,7 @@ class MasterOfParserGUI:
                 )
                 writer.writeheader()
 
+                first_line_skipped = False
                 for i, line in enumerate(fin, 1):
                     if self._stop_requested.is_set():
                         log("[!] Ejecución detenida por usuario.")
@@ -2153,12 +2240,31 @@ class MasterOfParserGUI:
                     if not line:
                         continue
 
+                    # QRadar TSV: saltar cabecera y extraer campos
+                    qradar_extra: dict = {}
+                    if qradar_cols:
+                        if not first_line_skipped:
+                            first_line_skipped = True
+                            continue  # saltar cabecera
+                        parts = _split_qradar_line(line, len(qradar_cols), qradar_delim)
+                        qradar_extra = _extract_qradar_fields(qradar_cols, parts)
+                        line = parts[payload_idx] if payload_idx < len(parts) else ""
+                        if not line:
+                            skipped += 1
+                            continue
+
                     record = parse_line(line)
                     if not record:
                         skipped += 1
                         continue
 
                     record = unify_cim_record(record, forti_src_zone_mode)
+
+                    # Merge columnas QRadar (no sobreescriben campos del payload)
+                    if qradar_extra:
+                        for k, v in qradar_extra.items():
+                            if v and not record.get(k):
+                                record[k] = v
 
                     vendor_name = record.get("vendor", "(sin_vendor)")
                     vendor_counts[vendor_name] += 1
@@ -4888,6 +4994,17 @@ Flujo recomendado:
         print("[+] raw_event: activado (salida más pesada)")
     print(f"[+] Forti src_zone: {args.forti_src_zone_mode}")
 
+    # ── Detectar formato QRadar ──────────────────────────────────────────────
+    qradar_result = detect_qradar_tsv(args.log_file)
+    qradar_cols = None
+    qradar_delim = ","
+    if qradar_result:
+        qradar_cols, qradar_delim = qradar_result
+        print(f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)")
+        payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
+    else:
+        print("[+] Formato:   raw syslog (una línea = un evento)")
+
     # ── Parsear ───────────────────────────────────────────────────────────────
     parsed = 0
     skipped = 0
@@ -4904,6 +5021,7 @@ Flujo recomendado:
         writer = csv.DictWriter(fout, fieldnames=output_columns, extrasaction="ignore")
         writer.writeheader()
 
+        first_line_skipped = False
         for i, line in enumerate(fin, 1):
             # Progreso cada 5%
             pct = (i * 100) // total_lines
@@ -4915,12 +5033,31 @@ Flujo recomendado:
             if not line:
                 continue
 
+            # QRadar TSV: saltar cabecera y extraer campos
+            qradar_extra: dict = {}
+            if qradar_cols:
+                if not first_line_skipped:
+                    first_line_skipped = True
+                    continue  # saltar cabecera
+                parts = _split_qradar_line(line, len(qradar_cols), qradar_delim)
+                qradar_extra = _extract_qradar_fields(qradar_cols, parts)
+                line = parts[payload_idx] if payload_idx < len(parts) else ""
+                if not line:
+                    skipped += 1
+                    continue
+
             record = parse_line(line)
             if not record:
                 skipped += 1
                 continue
 
             record = unify_cim_record(record, args.forti_src_zone_mode)
+
+            # Merge columnas QRadar (no sobreescriben campos del payload)
+            if qradar_extra:
+                for k, v in qradar_extra.items():
+                    if v and not record.get(k):
+                        record[k] = v
 
             vendor_name = record.get("vendor", "(sin_vendor)")
             vendor_counts[vendor_name] += 1
