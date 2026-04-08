@@ -31,6 +31,12 @@ from collections import defaultdict, Counter
 from datetime import datetime, timedelta
 
 try:
+    import pandas as pd
+    _HAS_PANDAS = True
+except ImportError:
+    _HAS_PANDAS = False
+
+try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
@@ -1632,6 +1638,10 @@ class MasterOfParserGUI:
         root.title("🤘 MasterOfParser")
         root.geometry("960x680")
         root.resizable(True, True)
+        try:
+            root.state("zoomed")
+        except Exception:
+            pass
 
         # ── Logo programático (tkinter Canvas, 0 RAM extra) ──────────────────
         self._set_window_icon(root)
@@ -1642,6 +1652,8 @@ class MasterOfParserGUI:
         self._stop_requested = threading.Event()
         self._analysis_refresh_after_id = None
         self._hist_refresh_after_id = None
+        self._analysis_zoom_stack: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        self._hist_zoom_stack: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
         # ── Header con logo inline ───────────────────────────────────────────
         header = tk.Frame(root, bg="#1a1a1a", height=44)
@@ -1662,11 +1674,38 @@ class MasterOfParserGUI:
         nb.add(self._tab_analysis, text="  Análisis  ")
         nb.add(self._tab_histograms, text="  Histogramas  ")
 
+        status = ttk.Frame(root)
+        status.pack(fill="x", side="bottom", padx=8, pady=(0, 8))
+        self._global_progress = ttk.Progressbar(status, mode="determinate", maximum=100)
+        self._global_progress.pack(fill="x")
+        self._global_progress_var = tk.StringVar(value="Listo.")
+        ttk.Label(status, textvariable=self._global_progress_var, anchor="w").pack(
+            fill="x", pady=(2, 0)
+        )
+
         self._build_parser_tab()
         self._build_results_tab()
         self._build_analysis_tab()
         self._build_histograms_tab()
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _set_global_progress(self, value: int, text: str = ""):
+        value = max(0, min(100, int(value)))
+        self._global_progress.configure(mode="determinate")
+        self._global_progress["value"] = value
+        if text:
+            self._global_progress_var.set(text)
+
+    def _set_global_busy(self, text: str):
+        self._global_progress.configure(mode="indeterminate")
+        self._global_progress.start(12)
+        self._global_progress_var.set(text)
+
+    def _finish_global_progress(self, text: str = "Listo."):
+        self._global_progress.stop()
+        self._global_progress.configure(mode="determinate")
+        self._global_progress["value"] = 100
+        self._global_progress_var.set(text)
 
     # ── Logo / icono ─────────────────────────────────────────────────────────
     def _set_window_icon(self, root):
@@ -1872,6 +1911,14 @@ class MasterOfParserGUI:
             text="ssid = nombre WiFi, interface = CORP-WIFI/GUEST-WIFI",
         ).pack(side="left")
 
+        row = ttk.Frame(tab)
+        row.pack(fill="x", **pad)
+        ttk.Label(row, text="Relacionar IOCs", width=20, anchor="w").pack(side="left")
+        self._ioc_src_var = tk.BooleanVar(value=True)
+        self._ioc_dst_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="src_ip (origen)", variable=self._ioc_src_var).pack(side="left", padx=4)
+        ttk.Checkbutton(row, text="dest_ip (destino)", variable=self._ioc_dst_var).pack(side="left", padx=4)
+
         ttk.Separator(tab, orient="horizontal").pack(fill="x", padx=8, pady=6)
 
         # Botones
@@ -1893,10 +1940,6 @@ class MasterOfParserGUI:
             command=self._open_results_tab,
         )
         self._open_results_btn.pack(side="left", padx=8)
-
-        # Barra de progreso
-        self._progress = ttk.Progressbar(tab, mode="indeterminate")
-        self._progress.pack(fill="x", padx=8, pady=4)
 
         # Consola
         ttk.Label(tab, text="Log de ejecución:", anchor="w").pack(fill="x", padx=8)
@@ -2010,10 +2053,6 @@ class MasterOfParserGUI:
         self._tree.bind("<B1-Motion>", self._on_tree_left_drag, add="+")
         self._tree.bind("<ButtonRelease-1>", self._on_tree_left_release, add="+")
 
-        # Barra de progreso de carga CSV
-        self._csv_progress = ttk.Progressbar(tab, mode="indeterminate")
-        self._csv_progress.pack(fill="x", padx=8, pady=(0, 2))
-
         # Barra de estado
         self._status_var = tk.StringVar(value="Sin datos cargados")
         ttk.Label(tab, textvariable=self._status_var, anchor="w").pack(
@@ -2022,6 +2061,7 @@ class MasterOfParserGUI:
 
         self._all_rows: list = []
         self._csv_columns: list = []
+        self._df = None  # Cache pandas DataFrame
         self._display_columns: list = []
         self._hidden_columns: set[str] = set()
         self._header_drag_col: str = ""
@@ -2098,6 +2138,8 @@ class MasterOfParserGUI:
         ioc_only = self._ioconly_var.get()
         include_raw_event = self._raw_event_var.get()
         forti_src_zone_mode = self._forti_src_zone_mode_var.get().strip() or "ssid"
+        ioc_src = self._ioc_src_var.get()
+        ioc_dst = self._ioc_dst_var.get()
         extract_ips = (
             self._extract_path_var.get().strip() if self._extract_var.get() else None
         )
@@ -2113,7 +2155,7 @@ class MasterOfParserGUI:
         self._run_btn.configure(state="disabled")
         self._pause_btn.configure(state="normal")
         self._open_results_btn.configure(state="disabled")
-        self._progress.start(10)
+        self._set_global_progress(0, "Procesando logs... 0%")
         self._console.configure(state="normal")
         self._console.delete("1.0", "end")
         self._console.configure(state="disabled")
@@ -2129,6 +2171,8 @@ class MasterOfParserGUI:
                 extract_ips,
                 include_raw_event,
                 forti_src_zone_mode,
+                ioc_src,
+                ioc_dst,
             ),
             daemon=True,
         ).start()
@@ -2149,6 +2193,8 @@ class MasterOfParserGUI:
         extract_ips,
         include_raw_event,
         forti_src_zone_mode,
+        ioc_src,
+        ioc_dst,
     ):
         q = self._queue
 
@@ -2195,6 +2241,7 @@ class MasterOfParserGUI:
             if include_raw_event:
                 log("[+] raw_event: activado (salida más pesada)")
             log(f"[+] Forti src_zone: {forti_src_zone_mode}")
+            log(f"[+] IOC src_ip: {ioc_src}, dest_ip: {ioc_dst}")
 
             # Detectar formato QRadar TSV
             qradar_result = detect_qradar_tsv(log_file)
@@ -2278,28 +2325,38 @@ class MasterOfParserGUI:
                         if dest_ip:
                             unique_ips.add(dest_ip)
 
-                    record.update(
-                        enrich_ioc_candidates(
-                            [record.get("src_ip", ""), record.get("src_ip_nat", "")],
-                            ioc_set,
-                            ioc_map,
-                            "src",
-                            ioc_raw_keys,
+                    if ioc_src:
+                        record.update(
+                            enrich_ioc_candidates(
+                                [record.get("src_ip", ""), record.get("src_ip_nat", "")],
+                                ioc_set,
+                                ioc_map,
+                                "src",
+                                ioc_raw_keys,
+                            )
                         )
-                    )
-                    record.update(
-                        enrich_ioc_candidates(
-                            [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
-                            ioc_set,
-                            ioc_map,
-                            "dst",
-                            ioc_raw_keys,
+                    if ioc_dst:
+                        record.update(
+                            enrich_ioc_candidates(
+                                [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
+                                ioc_set,
+                                ioc_map,
+                                "dst",
+                                ioc_raw_keys,
+                            )
                         )
-                    )
 
-                    has_ioc = (
-                        record.get("ioc_src") == "YES" or record.get("ioc_dst") == "YES"
+                    src_hit = (
+                        record.get("ioc_src") == "YES"
+                        if ioc_src
+                        else False
                     )
+                    dst_hit = (
+                        record.get("ioc_dst") == "YES"
+                        if ioc_dst
+                        else False
+                    )
+                    has_ioc = src_hit or dst_hit
                     if has_ioc:
                         ioc_hits += 1
                         ioc_hits_by_vendor[vendor_name] += 1
@@ -2355,7 +2412,7 @@ class MasterOfParserGUI:
                     self._log(data)
                 elif kind == "done":
                     self._last_output = data
-                    self._progress.stop()
+                    self._finish_global_progress("Proceso completado (100%).")
                     self._run_btn.configure(state="normal")
                     self._pause_btn.configure(state="disabled")
                     self._open_results_btn.configure(state="normal")
@@ -2363,7 +2420,7 @@ class MasterOfParserGUI:
                     return
                 elif kind == "cancelled":
                     self._last_output = data
-                    self._progress.stop()
+                    self._finish_global_progress("Proceso detenido por usuario.")
                     self._run_btn.configure(state="normal")
                     self._pause_btn.configure(state="disabled")
                     if data and os.path.isfile(data):
@@ -2374,11 +2431,14 @@ class MasterOfParserGUI:
                     )
                     return
                 elif kind == "error":
-                    self._progress.stop()
+                    self._finish_global_progress("Error durante la ejecución.")
                     self._run_btn.configure(state="normal")
                     self._pause_btn.configure(state="disabled")
                     messagebox.showerror("Error durante la ejecución", data)
                     return
+                elif kind == "progress":
+                    pct = int(data)
+                    self._set_global_progress(pct, f"Procesando logs... {pct}%")
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
@@ -2434,33 +2494,46 @@ class MasterOfParserGUI:
             return
 
         self._status_var.set(f"Cargando {os.path.basename(path)}…")
-        self._csv_progress.start(10)
+        self._set_global_progress(0, f"Cargando CSV... 0% ({os.path.basename(path)})")
 
         def _read():
             try:
-                rows = []
-                with open(path, encoding="utf-8-sig", errors="replace") as f:
-                    reader = csv.DictReader(f)
-                    cols = list(reader.fieldnames or [])
-                    for row in reader:
-                        rows.append([row.get(c, "") for c in cols])
+                fname = os.path.basename(path)
+                self.root.after(0, lambda: self._set_global_progress(10, f"Leyendo CSV... ({fname})"))
+                if _HAS_PANDAS:
+                    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str,
+                                      keep_default_na=False, low_memory=False)
+                    cols = df.columns.tolist()
+                    rows = df.values.tolist()
+                else:
+                    rows = []
+                    with open(path, encoding="utf-8-sig", errors="replace") as f:
+                        reader = csv.DictReader(f)
+                        cols = list(reader.fieldnames or [])
+                        for row in reader:
+                            rows.append([row.get(c, "") for c in cols])
                 self.root.after(0, lambda: self._finish_csv_load(path, cols, rows))
             except Exception as exc:
                 self.root.after(0, lambda: (
-                    self._csv_progress.stop(),
+                    self._finish_global_progress("Error cargando CSV."),
                     messagebox.showerror("Error cargando CSV", str(exc))
                 ))
 
         threading.Thread(target=_read, daemon=True).start()
 
     def _finish_csv_load(self, path: str, cols: list, rows: list):
-        self._csv_progress.stop()
+        self._set_global_progress(50, f"Preparando tabla... ({os.path.basename(path)})")
         self._loaded_csv_path = path
         self._last_output = path  # compartir con todas las pestañas
         self._csv_columns = cols
         self._display_columns = list(cols)
         self._hidden_columns = set()
         self._all_rows = rows
+        # Cache DataFrame para operaciones rápidas
+        if _HAS_PANDAS:
+            self._df = pd.DataFrame(rows, columns=cols)
+        else:
+            self._df = None
         self._sort_col = ""
         self._sort_asc = True
         self._setup_tree(cols, rows)
@@ -2528,8 +2601,28 @@ class MasterOfParserGUI:
                     minwidth=60,
                     stretch=False,
                 )
-        for row in rows:
-            tree.insert("", "end", values=row)
+        # Inserción por lotes para no congelar la GUI
+        self._tree_batch_rows = rows
+        self._tree_batch_idx = 0
+        self._insert_tree_batch()
+
+    def _insert_tree_batch(self):
+        """Inserta filas en el Treeview en lotes de 500 para mantener la GUI responsiva."""
+        BATCH = 500
+        tree = self._tree
+        rows = self._tree_batch_rows
+        start = self._tree_batch_idx
+        end = min(start + BATCH, len(rows))
+        for i in range(start, end):
+            tree.insert("", "end", values=rows[i])
+        self._tree_batch_idx = end
+        if end < len(rows):
+            pct = int(end * 100 / len(rows))
+            self._set_global_progress(pct, f"Cargando tabla... {pct}% ({end:,}/{len(rows):,})")
+            self.root.after(1, self._insert_tree_batch)
+        else:
+            self._tree_batch_rows = None
+            self._finish_global_progress(f"Tabla cargada · {len(rows):,} filas")
 
     def _open_calendar_popup(self, target_var: "tk.StringVar"):
         popup = tk.Toplevel(self.root)
@@ -3032,21 +3125,34 @@ class MasterOfParserGUI:
             return
         if col not in self._csv_columns:
             return
-        idx = self._csv_columns.index(col)
         if self._sort_col == col:
             self._sort_asc = not self._sort_asc
         else:
             self._sort_col = col
             self._sort_asc = True
 
-        def sort_key(row):
-            val = row[idx]
-            try:
-                return (0, float(val))
-            except (ValueError, TypeError):
-                return (1, str(val).lower())
+        if _HAS_PANDAS and self._df is not None:
+            numeric = pd.to_numeric(self._df[col], errors="coerce")
+            sort_col = numeric.fillna(float("inf")) if self._sort_asc else numeric.fillna(float("-inf"))
+            if numeric.isna().all():
+                self._df = self._df.sort_values(by=col, ascending=self._sort_asc, key=lambda s: s.str.lower())
+            else:
+                order = sort_col.argsort()
+                if not self._sort_asc:
+                    order = order[::-1]
+                self._df = self._df.iloc[order].reset_index(drop=True)
+            self._all_rows = self._df.values.tolist()
+        else:
+            idx = self._csv_columns.index(col)
 
-        self._all_rows.sort(key=sort_key, reverse=not self._sort_asc)
+            def sort_key(row):
+                val = row[idx]
+                try:
+                    return (0, float(val))
+                except (ValueError, TypeError):
+                    return (1, str(val).lower())
+
+            self._all_rows.sort(key=sort_key, reverse=not self._sort_asc)
         self._apply_filter()
 
     # ── Pestaña Análisis ─────────────────────────────────────────────────────
@@ -3057,9 +3163,36 @@ class MasterOfParserGUI:
         paned = ttk.PanedWindow(tab, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # ── Panel izquierdo: controles ───────────────────────────────────────
-        ctrl = ttk.LabelFrame(paned, text="Configuración", padding=8)
-        paned.add(ctrl, weight=0)
+        # ── Panel izquierdo: controles (con scroll) ─────────────────────────
+        ctrl_outer = ttk.LabelFrame(paned, text="Configuración", padding=0)
+        paned.add(ctrl_outer, weight=0)
+
+        _canvas = tk.Canvas(ctrl_outer, highlightthickness=0, width=220)
+        _vsb = ttk.Scrollbar(ctrl_outer, orient="vertical", command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side="right", fill="y")
+        _canvas.pack(side="left", fill="both", expand=True)
+
+        ctrl = ttk.Frame(_canvas, padding=8)
+        _canvas.create_window((0, 0), window=ctrl, anchor="nw")
+
+        def _on_ctrl_configure(_event=None):
+            _canvas.configure(scrollregion=_canvas.bbox("all"))
+
+        ctrl.bind("<Configure>", _on_ctrl_configure)
+
+        # Scroll con rueda del ratón en el panel de controles
+        def _on_mousewheel(event):
+            _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            _canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            _canvas.unbind_all("<MouseWheel>")
+
+        _canvas.bind("<Enter>", _bind_mousewheel)
+        _canvas.bind("<Leave>", _unbind_mousewheel)
 
         ttk.Label(ctrl, text="Agrupar por:").pack(anchor="w")
         self._pivot_col_var = tk.StringVar(value="src_ip")
@@ -3220,6 +3353,13 @@ class MasterOfParserGUI:
         ttk.Button(ctrl, text="🔄  Regenerar", command=self._generate_pivot).pack(
             fill="x"
         )
+        self._analysis_zoom_back_btn = ttk.Button(
+            ctrl,
+            text="↩  Volver zoom",
+            command=self._analysis_zoom_back,
+            state="disabled",
+        )
+        self._analysis_zoom_back_btn.pack(fill="x", pady=(4, 0))
         ttk.Button(ctrl, text="⚡  Forzar refresco", command=self._generate_pivot).pack(
             fill="x", pady=(4, 0)
         )
@@ -3273,7 +3413,7 @@ class MasterOfParserGUI:
         )
         ttk.Label(
             ctrl,
-            text="(filtros: = exacto, ! excluye)",
+            text="(= exacto, ! excluye, AND, OR)",
             font=("", 7),
             foreground="#888888",
         ).pack(anchor="w", pady=(0, 4))
@@ -3474,6 +3614,7 @@ class MasterOfParserGUI:
             self._fig = Figure(figsize=(8.8, 5.2), dpi=110, facecolor="#ffffff")
             self._canvas_mpl = FigureCanvasTkAgg(self._fig, master=chart_frame)
             self._canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            self._canvas_mpl.mpl_connect("button_press_event", self._on_analysis_dblclick)
         else:
             self._canvas_mpl = None
             ttk.Label(
@@ -3491,8 +3632,34 @@ class MasterOfParserGUI:
         paned = ttk.PanedWindow(tab, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=8, pady=8)
 
-        ctrl = ttk.LabelFrame(paned, text="Configuración temporal", padding=8)
-        paned.add(ctrl, weight=0)
+        ctrl_outer = ttk.LabelFrame(paned, text="Configuración temporal", padding=0)
+        paned.add(ctrl_outer, weight=0)
+
+        _hcanvas = tk.Canvas(ctrl_outer, highlightthickness=0, width=220)
+        _hvsb = ttk.Scrollbar(ctrl_outer, orient="vertical", command=_hcanvas.yview)
+        _hcanvas.configure(yscrollcommand=_hvsb.set)
+        _hvsb.pack(side="right", fill="y")
+        _hcanvas.pack(side="left", fill="both", expand=True)
+
+        ctrl = ttk.Frame(_hcanvas, padding=8)
+        _hcanvas.create_window((0, 0), window=ctrl, anchor="nw")
+
+        def _on_hctrl_configure(_event=None):
+            _hcanvas.configure(scrollregion=_hcanvas.bbox("all"))
+
+        ctrl.bind("<Configure>", _on_hctrl_configure)
+
+        def _on_hmousewheel(event):
+            _hcanvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_hmousewheel(event):
+            _hcanvas.bind_all("<MouseWheel>", _on_hmousewheel)
+
+        def _unbind_hmousewheel(event):
+            _hcanvas.unbind_all("<MouseWheel>")
+
+        _hcanvas.bind("<Enter>", _bind_hmousewheel)
+        _hcanvas.bind("<Leave>", _unbind_hmousewheel)
 
         ttk.Label(ctrl, text="Serie por:").pack(anchor="w")
         self._hist_series_col_var = tk.StringVar(value=_NO_SERIES_FIELD)
@@ -3625,6 +3792,13 @@ class MasterOfParserGUI:
             ctrl, text="📊  Generar histograma", command=self._generate_histogram_view
         )
         self._hist_generate_btn.pack(fill="x")
+        self._hist_zoom_back_btn = ttk.Button(
+            ctrl,
+            text="↩  Volver zoom",
+            command=self._hist_zoom_back,
+            state="disabled",
+        )
+        self._hist_zoom_back_btn.pack(fill="x", pady=(4, 0))
         ttk.Button(
             ctrl, text="⚡  Forzar refresco", command=self._generate_histogram_view
         ).pack(fill="x", pady=(4, 0))
@@ -3664,6 +3838,7 @@ class MasterOfParserGUI:
                 self._hist_fig, master=chart_frame
             )
             self._hist_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            self._hist_canvas_mpl.mpl_connect("button_press_event", self._on_hist_dblclick)
         else:
             self._hist_canvas_mpl = None
             ttk.Label(
@@ -3852,15 +4027,36 @@ class MasterOfParserGUI:
         if not field_name or field_name == _NO_FILTER_FIELD or not filter_value:
             return True
         raw_value = str(filter_value or "").strip()
+        cell_value = self._get_row_value(row, field_name).lower()
+
+        # Detectar OR (case-insensitive)
+        or_parts = re.split(r'\s+OR\s+', raw_value, flags=re.IGNORECASE)
+        if len(or_parts) > 1:
+            for part in or_parts:
+                and_parts = re.split(r'\s+AND\s+', part.strip(), flags=re.IGNORECASE)
+                if all(self._check_single_condition(c.strip(), cell_value) for c in and_parts):
+                    return True
+            return False
+
+        # Detectar AND (case-insensitive)
+        and_parts = re.split(r'\s+AND\s+', raw_value, flags=re.IGNORECASE)
+        if len(and_parts) > 1:
+            return all(self._check_single_condition(c.strip(), cell_value) for c in and_parts)
+
+        return self._check_single_condition(raw_value, cell_value)
+    
+    def _check_single_condition(self, raw_value: str, cell_value: str) -> bool:
+        """Evalúa una condición simple (sin OR)."""
         exact = raw_value.startswith("=")
         exclude = raw_value.startswith("!")
         cmp_value = raw_value[1:].strip() if (exact or exclude) else raw_value
-        cell_value = self._get_row_value(row, field_name).lower()
+        cmp_value = cmp_value.lower()
+        
         if exact:
-            return cell_value == cmp_value.lower()
+            return cell_value == cmp_value
         if exclude:
-            return cmp_value.lower() not in cell_value
-        return cmp_value.lower() in cell_value
+            return cmp_value not in cell_value
+        return cmp_value in cell_value
 
     def _parse_time_bound(
         self, raw_value: str, is_end: bool = False
@@ -4000,7 +4196,9 @@ class MasterOfParserGUI:
         ]
 
     def _generate_pivot(self):
+        self._set_global_progress(0, "Generando gráfico de análisis... 0%")
         if not self._all_rows or not self._csv_columns:
+            self._finish_global_progress("Sin datos para análisis.")
             messagebox.showwarning(
                 "Sin datos",
                 "Carga primero un CSV en la pestaña Resultados o desde allí.",
@@ -4009,6 +4207,7 @@ class MasterOfParserGUI:
 
         col = self._pivot_col_var.get().strip()
         if not self._field_exists_for_analysis(col):
+            self._finish_global_progress("Error: campo de análisis no disponible.")
             messagebox.showerror(
                 "Error", f"Columna '{col}' no encontrada en los datos."
             )
@@ -4017,6 +4216,7 @@ class MasterOfParserGUI:
         secondary_col = self._pivot_secondary_col_var.get().strip()
         use_secondary = secondary_col and secondary_col != _NO_SECONDARY_FIELD
         if use_secondary and not self._field_exists_for_analysis(secondary_col):
+            self._finish_global_progress("Error: campo secundario no disponible.")
             messagebox.showerror(
                 "Error", f"Columna secundaria '{secondary_col}' no encontrada."
             )
@@ -4065,7 +4265,8 @@ class MasterOfParserGUI:
 
         # Agrupación
         agg: dict = defaultdict(float)
-        for row in rows:
+        total_rows = max(1, len(rows))
+        for idx, row in enumerate(rows, 1):
             primary_value = self._get_row_value(row, col) or "(vacío)"
             if self._analysis_exclude_empty_var.get() and primary_value == "(vacío)":
                 continue
@@ -4086,6 +4287,10 @@ class MasterOfParserGUI:
                     pass
             else:
                 agg[key] += 1
+            if idx % 2000 == 0:
+                pct = min(90, int((idx * 90) / total_rows))
+                self._set_global_progress(pct, f"Generando gráfico de análisis... {pct}%")
+                self.root.update_idletasks()
 
         sorted_items = sorted(agg.items(), key=lambda x: x[1], reverse=True)
         if not self._pivot_topn_all.get():
@@ -4154,6 +4359,7 @@ class MasterOfParserGUI:
             )
 
         self._nb.select(self._tab_analysis)
+        self._finish_global_progress("Gráfico de análisis listo (100%).")
 
     def _detect_anomalies(self, bucket: str | None = None, ioc_only: bool = False):
         if not self._all_rows or not self._csv_columns:
@@ -4322,28 +4528,68 @@ class MasterOfParserGUI:
                 )
 
         elif chart_type == "Quesito (pie)":
+            import math
             wedge = {"edgecolor": "white", "linewidth": 1.2}
-            ax.pie(
+            wedges, autotexts = ax.pie(
                 values,
-                labels=pretty_labels,
-                autopct="%1.1f%%",
+                autopct=None,
                 colors=colors,
                 wedgeprops=wedge,
-                textprops={"fontsize": 8},
+                startangle=90,
             )
+            for i, (w, label) in enumerate(zip(wedges, pretty_labels)):
+                pct = values[i] / total * 100
+                ang = (w.theta2 + w.theta1) / 2
+                x = math.cos(math.radians(ang))
+                y = math.sin(math.radians(ang))
+                ha = "left" if x >= 0 else "right"
+                conn_style = "arc3,rad=0.15" if x >= 0 else "arc3,rad=-0.15"
+                ax.annotate(
+                    f"{label}  ({pct:.1f}%)",
+                    xy=(0.9 * x, 0.9 * y),
+                    xytext=(1.35 * x, 1.25 * y),
+                    ha=ha,
+                    va="center",
+                    fontsize=7,
+                    arrowprops=dict(
+                        arrowstyle="-",
+                        color="#666666",
+                        connectionstyle=conn_style,
+                        lw=0.8,
+                    ),
+                )
 
         elif chart_type == "Donut":
+            import math
             wedge = {"width": 0.42, "edgecolor": "white", "linewidth": 1.2}
-            ax.pie(
+            wedges, autotexts = ax.pie(
                 values,
-                labels=pretty_labels,
-                autopct="%1.1f%%",
+                autopct=None,
                 colors=colors,
                 wedgeprops=wedge,
-                textprops={"fontsize": 8},
-                pctdistance=0.8,
-                labeldistance=1.06,
+                startangle=90,
             )
+            for i, (w, label) in enumerate(zip(wedges, pretty_labels)):
+                pct = values[i] / total * 100
+                ang = (w.theta2 + w.theta1) / 2
+                x = math.cos(math.radians(ang))
+                y = math.sin(math.radians(ang))
+                ha = "left" if x >= 0 else "right"
+                conn_style = "arc3,rad=0.15" if x >= 0 else "arc3,rad=-0.15"
+                ax.annotate(
+                    f"{label}  ({pct:.1f}%)",
+                    xy=(0.85 * x, 0.85 * y),
+                    xytext=(1.35 * x, 1.25 * y),
+                    ha=ha,
+                    va="center",
+                    fontsize=7,
+                    arrowprops=dict(
+                        arrowstyle="-",
+                        color="#666666",
+                        connectionstyle=conn_style,
+                        lw=0.8,
+                    ),
+                )
             ax.text(
                 0,
                 0,
@@ -4378,6 +4624,9 @@ class MasterOfParserGUI:
             ax.set_title(f"{col}  —  {metric}", fontsize=11, pad=10, color="#222222")
         self._fig.tight_layout()
         self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
 
     def _draw_time_series(
         self,
@@ -4431,6 +4680,9 @@ class MasterOfParserGUI:
         ax.legend(fontsize=8)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
 
     def _draw_time_histogram(self):
         """Histograma de barras por fecha/hora (estilo QRadar), sin detección de picos."""
@@ -4527,6 +4779,9 @@ class MasterOfParserGUI:
         )
         self._fig.tight_layout()
         self._canvas_mpl.draw()
+        self._analysis_zoom_stack.clear()
+        if hasattr(self, "_analysis_zoom_back_btn"):
+            self._analysis_zoom_back_btn.configure(state="disabled")
         self._status_var.set(
             f"Histograma temporal: {parsed_rows:,} filas · {n} intervalos · {bucket}"
         )
@@ -4599,6 +4854,7 @@ class MasterOfParserGUI:
 
         self._hist_generate_btn.configure(state="disabled")
         self._hist_status_var.set("Calculando histograma…")
+        self._set_global_progress(0, "Generando histograma... 0%")
         self.root.update_idletasks()
 
         def _worker():
@@ -4631,7 +4887,8 @@ class MasterOfParserGUI:
                 grouped: dict = defaultdict(lambda: defaultdict(float))
                 series_totals: Counter = Counter()
                 parsed_rows = 0
-                for row in rows:
+                total_rows = max(1, len(rows))
+                for idx, row in enumerate(rows, 1):
                     dt = _parse_timestamp(row[timestamp_idx])
                     if dt is None:
                         continue
@@ -4648,6 +4905,14 @@ class MasterOfParserGUI:
                     grouped[bucket_dt][series_value] += value
                     series_totals[series_value] += value
                     parsed_rows += 1
+                    if idx % 2000 == 0:
+                        pct = min(90, int((idx * 90) / total_rows))
+                        self.root.after(
+                            0,
+                            lambda p=pct: self._set_global_progress(
+                                p, f"Generando histograma... {p}%"
+                            ),
+                        )
 
                 if not grouped:
 
@@ -4658,6 +4923,7 @@ class MasterOfParserGUI:
                         )
                         self._hist_generate_btn.configure(state="normal")
                         self._hist_status_var.set("Sin timestamps válidos.")
+                        self._finish_global_progress("Sin timestamps válidos.")
 
                     self.root.after(0, _no_ts)
                     return
@@ -4701,6 +4967,7 @@ class MasterOfParserGUI:
                 def _fail():
                     self._hist_generate_btn.configure(state="normal")
                     self._hist_status_var.set("Error al calcular histograma.")
+                    self._finish_global_progress("Error al generar histograma.")
                     messagebox.showerror("Error en histograma", str(exc))
 
                 self.root.after(0, _fail)
@@ -4802,12 +5069,74 @@ class MasterOfParserGUI:
                 ax.set_title(title, fontsize=11, pad=10, color="#222222")
             self._hist_fig.tight_layout()
             self._hist_canvas_mpl.draw()
+            self._hist_zoom_stack.clear()
+            if hasattr(self, "_hist_zoom_back_btn"):
+                self._hist_zoom_back_btn.configure(state="disabled")
 
         self._hist_status_var.set(
             f"Histograma: {parsed_rows:,} filas válidas · {len(ordered_buckets)} intervalos · {len(series_names)} series"
         )
         self._hist_generate_btn.configure(state="normal")
+        self._finish_global_progress("Histograma listo (100%).")
         self._nb.select(self._tab_histograms)
+
+    def _zoom_axis(self, ax, x: float, y: float, zoom_factor: float = 0.5):
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        width = (x1 - x0) * zoom_factor
+        height = (y1 - y0) * zoom_factor
+        if width <= 0 or height <= 0:
+            return
+        ax.set_xlim(x - (width / 2), x + (width / 2))
+        ax.set_ylim(y - (height / 2), y + (height / 2))
+
+    def _on_analysis_dblclick(self, event):
+        if not getattr(event, "dblclick", False) or event.inaxes is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        ax = event.inaxes
+        self._analysis_zoom_stack.append((ax.get_xlim(), ax.get_ylim()))
+        self._zoom_axis(ax, event.xdata, event.ydata, zoom_factor=0.5)
+        self._analysis_zoom_back_btn.configure(state="normal")
+        self._canvas_mpl.draw_idle()
+
+    def _on_hist_dblclick(self, event):
+        if not getattr(event, "dblclick", False) or event.inaxes is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        ax = event.inaxes
+        self._hist_zoom_stack.append((ax.get_xlim(), ax.get_ylim()))
+        self._zoom_axis(ax, event.xdata, event.ydata, zoom_factor=0.5)
+        self._hist_zoom_back_btn.configure(state="normal")
+        self._hist_canvas_mpl.draw_idle()
+
+    def _analysis_zoom_back(self):
+        if not self._analysis_zoom_stack or self._canvas_mpl is None:
+            return
+        ax_list = self._fig.get_axes()
+        if not ax_list:
+            return
+        xlim, ylim = self._analysis_zoom_stack.pop()
+        ax_list[0].set_xlim(*xlim)
+        ax_list[0].set_ylim(*ylim)
+        if not self._analysis_zoom_stack:
+            self._analysis_zoom_back_btn.configure(state="disabled")
+        self._canvas_mpl.draw_idle()
+
+    def _hist_zoom_back(self):
+        if not self._hist_zoom_stack or self._hist_canvas_mpl is None:
+            return
+        ax_list = self._hist_fig.get_axes()
+        if not ax_list:
+            return
+        xlim, ylim = self._hist_zoom_stack.pop()
+        ax_list[0].set_xlim(*xlim)
+        ax_list[0].set_ylim(*ylim)
+        if not self._hist_zoom_stack:
+            self._hist_zoom_back_btn.configure(state="disabled")
+        self._hist_canvas_mpl.draw_idle()
 
     def _export_hist_chart(self):
         if not _HAS_MPL or self._hist_canvas_mpl is None:
@@ -4920,6 +5249,16 @@ Flujo recomendado:
         help="Incluir solo filas donde src_ip o dest_ip tienen match en el IOC CSV",
     )
     parser.add_argument(
+        "--no-ioc-src",
+        action="store_true",
+        help="No relacionar IOCs con src_ip (origen)",
+    )
+    parser.add_argument(
+        "--no-ioc-dst",
+        action="store_true",
+        help="No relacionar IOCs con dest_ip (destino)",
+    )
+    parser.add_argument(
         "--raw-event",
         action="store_true",
         help="Incluir la columna raw_event con la línea original completa (más pesado)",
@@ -4993,6 +5332,7 @@ Flujo recomendado:
     if args.raw_event:
         print("[+] raw_event: activado (salida más pesada)")
     print(f"[+] Forti src_zone: {args.forti_src_zone_mode}")
+    print(f"[+] IOC src_ip: {not args.no_ioc_src}, dest_ip: {not args.no_ioc_dst}")
 
     # ── Detectar formato QRadar ──────────────────────────────────────────────
     qradar_result = detect_qradar_tsv(args.log_file)
@@ -5072,27 +5412,39 @@ Flujo recomendado:
                 if dest_ip:
                     unique_ips.add(dest_ip)
 
-            # Enriquecimiento IOC
-            record.update(
-                enrich_ioc_candidates(
-                    [record.get("src_ip", ""), record.get("src_ip_nat", "")],
-                    ioc_set,
-                    ioc_map,
-                    "src",
-                    ioc_raw_keys,
+            # Enriquecimiento IOC según dirección
+            if not args.no_ioc_src:
+                record.update(
+                    enrich_ioc_candidates(
+                        [record.get("src_ip", ""), record.get("src_ip_nat", "")],
+                        ioc_set,
+                        ioc_map,
+                        "src",
+                        ioc_raw_keys,
+                    )
                 )
-            )
-            record.update(
-                enrich_ioc_candidates(
-                    [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
-                    ioc_set,
-                    ioc_map,
-                    "dst",
-                    ioc_raw_keys,
+            if not args.no_ioc_dst:
+                record.update(
+                    enrich_ioc_candidates(
+                        [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
+                        ioc_set,
+                        ioc_map,
+                        "dst",
+                        ioc_raw_keys,
+                    )
                 )
-            )
 
-            has_ioc = record.get("ioc_src") == "YES" or record.get("ioc_dst") == "YES"
+            src_hit = (
+                record.get("ioc_src") == "YES"
+                if not args.no_ioc_src
+                else False
+            )
+            dst_hit = (
+                record.get("ioc_dst") == "YES"
+                if not args.no_ioc_dst
+                else False
+            )
+            has_ioc = src_hit or dst_hit
             if has_ioc:
                 ioc_hits += 1
                 ioc_hits_by_vendor[vendor_name] += 1
