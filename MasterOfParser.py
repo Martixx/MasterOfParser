@@ -5812,37 +5812,25 @@ class MasterOfParserGUI:
 
     # ── Copiar imagen / datos al portapapeles ─────────────────────────────
     def _copy_figure_to_clipboard(self, fig):
-        """Copia una Figure de matplotlib al portapapeles de Windows como BMP."""
+        """Copia una Figure de matplotlib al portapapeles de Windows."""
+        import subprocess
+        import tempfile
         try:
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-            buf.seek(0)
-            # Usar PIL si está disponible
-            from PIL import Image
-            img = Image.open(buf)
-            bmp_buf = io.BytesIO()
-            img.convert("RGB").save(bmp_buf, format="BMP")
-            bmp_data = bmp_buf.getvalue()[14:]  # skip BMP file header
-            bmp_buf.close()
-            buf.close()
-            import ctypes
-            CF_DIB = 8
-            kernel32 = ctypes.windll.kernel32
-            user32 = ctypes.windll.user32
-            user32.OpenClipboard(0)
-            user32.EmptyClipboard()
-            h = kernel32.GlobalAlloc(0x0042, len(bmp_data))
-            p = kernel32.GlobalLock(h)
-            ctypes.memmove(p, bmp_data, len(bmp_data))
-            kernel32.GlobalUnlock(h)
-            user32.SetClipboardData(CF_DIB, h)
-            user32.CloseClipboard()
-            self._set_global_progress(100, "Imagen copiada al portapapeles.")
-        except ImportError:
-            messagebox.showwarning(
-                "Pillow necesario",
-                "Instala Pillow para copiar imágenes:\n  pip install Pillow",
+            tmp = os.path.join(tempfile.gettempdir(), "_mop_clipboard.png")
+            fig.savefig(tmp, format="png", dpi=150, bbox_inches="tight")
+            # Usar PowerShell + System.Windows.Forms para copiar la imagen
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "Add-Type -AssemblyName System.Drawing;"
+                f"$img = [System.Drawing.Image]::FromFile('{tmp}');"
+                "[System.Windows.Forms.Clipboard]::SetImage($img);"
+                "$img.Dispose()"
             )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True, timeout=10,
+            )
+            self._set_global_progress(100, "Imagen copiada al portapapeles.")
         except Exception as exc:
             messagebox.showerror("Error al copiar imagen", str(exc))
 
@@ -5907,10 +5895,13 @@ class MasterOfParserGUI:
                     )
 
         # Posicionar menú en coordenadas de pantalla
-        widget = self._canvas_mpl.get_tk_widget()
-        x_screen = widget.winfo_rootx() + int(event.x)
-        y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
-        m.tk_popup(x_screen, y_screen)
+        try:
+            widget = self._canvas_mpl.get_tk_widget()
+            x_screen = widget.winfo_rootx() + int(event.x)
+            y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
+            m.tk_popup(x_screen, y_screen)
+        except Exception:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
 
     def _do_drilldown(self, filter_field: str, clicked_label: str):
         """Aplica drill-down en Filtro 2."""
@@ -5956,10 +5947,13 @@ class MasterOfParserGUI:
             label="📋  Copiar tabla series",
             command=lambda: self._copy_tree_to_clipboard(self._hist_tree),
         )
-        widget = self._hist_canvas_mpl.get_tk_widget()
-        x_screen = widget.winfo_rootx() + int(event.x)
-        y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
-        m.tk_popup(x_screen, y_screen)
+        try:
+            widget = self._hist_canvas_mpl.get_tk_widget()
+            x_screen = widget.winfo_rootx() + int(event.x)
+            y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
+            m.tk_popup(x_screen, y_screen)
+        except Exception:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
 
     def _show_tree_copy_menu(self, event, tree: ttk.Treeview):
         """Menú contextual para copiar contenido de un Treeview."""
