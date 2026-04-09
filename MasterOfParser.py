@@ -20,6 +20,7 @@ Salida: CSV CIM con BOM UTF-8 (compatible con Excel directamente).
 
 import csv
 import calendar
+import io
 import re
 import sys
 import os
@@ -2520,6 +2521,7 @@ class MasterOfParserGUI:
         self._hist_topn_var.set("8")
         self._hist_topn_all.set(False)
         self._hist_exclude_empty_var.set(True)
+        self._hist_fill_gaps_var.set(True)
         self._hist_ioc_only_var.set(False)
 
     def _open_results_tab(self):
@@ -2855,18 +2857,24 @@ class MasterOfParserGUI:
                     row_text = " | ".join(str(v) for v in row).lower()
                     test_value = str(value or "").strip()
                     if test_value.startswith("="):
-                        cmp_value = test_value[1:].strip().lower()
-                        if not any(str(v).lower() == cmp_value for v in row):
+                        # Exacto: al menos una celda debe matchear
+                        cmp_val = test_value[1:].strip()
+                        if not any(
+                            self._check_single_condition(f"={cmp_val}", str(v).lower())
+                            for v in row
+                        ):
                             ok = False
                             break
                     elif test_value.startswith("!"):
-                        cmp_value = test_value[1:].strip().lower()
-                        if cmp_value in row_text:
+                        # Excluir: row_text NO debe contener
+                        if not self._check_single_condition(test_value, row_text):
                             ok = False
                             break
-                    elif test_value.lower() not in row_text:
-                        ok = False
-                        break
+                    else:
+                        # Contiene / wildcard
+                        if not self._check_single_condition(test_value, row_text):
+                            ok = False
+                            break
                 elif not self._apply_generic_filter(row, field, value):
                     ok = False
                     break
@@ -3438,6 +3446,9 @@ class MasterOfParserGUI:
         ttk.Button(
             ctrl, text="💾  Exportar (imagen + CSV)", command=self._export_chart
         ).pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            ctrl, text="📋  Exportar detalle (filas)", command=self._export_detail_csv
+        ).pack(fill="x", pady=(4, 0))
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
 
         ttk.Label(ctrl, text="Anomalías temporales:", font=("", 9, "bold")).pack(
@@ -3663,13 +3674,16 @@ class MasterOfParserGUI:
                 ),
             ).pack(fill="x", pady=1)
 
-        # ── Panel derecho: tabla + gráfico ───────────────────────────────────
-        right = ttk.PanedWindow(paned, orient="vertical")
+        # ── Panel derecho: tabla + gráfico (separador arrastrable) ────────────
+        right = tk.PanedWindow(
+            paned, orient=tk.VERTICAL, sashwidth=6, sashrelief="raised",
+            bg="#cccccc",
+        )
         paned.add(right, weight=1)
 
         # Tabla pivot
         tbl_frame = ttk.LabelFrame(right, text="Tabla pivot", padding=4)
-        right.add(tbl_frame, weight=1)
+        right.add(tbl_frame, minsize=80, stretch="always")
         self._pivot_tree = ttk.Treeview(tbl_frame, show="headings", height=8)
         vsb_p = ttk.Scrollbar(
             tbl_frame, orient="vertical", command=self._pivot_tree.yview
@@ -3677,10 +3691,14 @@ class MasterOfParserGUI:
         self._pivot_tree.configure(yscrollcommand=vsb_p.set)
         self._pivot_tree.pack(side="left", fill="both", expand=True)
         vsb_p.pack(side="right", fill="y")
+        self._pivot_tree.bind(
+            "<Button-3>",
+            lambda e: self._show_tree_copy_menu(e, self._pivot_tree),
+        )
 
         # Área de gráfico
         chart_frame = ttk.LabelFrame(right, text="Gráfico", padding=4)
-        right.add(chart_frame, weight=2)
+        right.add(chart_frame, minsize=120, stretch="always")
 
         if _HAS_MPL:
             self._fig = Figure(figsize=(8.8, 5.2), dpi=110, facecolor="#ffffff")
@@ -3688,6 +3706,9 @@ class MasterOfParserGUI:
             self._canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
             self._canvas_mpl.mpl_connect(
                 "button_press_event", self._on_analysis_dblclick
+            )
+            self._canvas_mpl.mpl_connect(
+                "button_press_event", self._on_analysis_rightclick
             )
         else:
             self._canvas_mpl = None
@@ -3856,7 +3877,11 @@ class MasterOfParserGUI:
         self._hist_exclude_empty_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             ctrl, text="Excluir claves vacías", variable=self._hist_exclude_empty_var
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(anchor="w", pady=(0, 2))
+        self._hist_fill_gaps_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            ctrl, text="Rellenar intervalos vacíos", variable=self._hist_fill_gaps_var
+        ).pack(anchor="w", pady=(0, 2))
         self._hist_ioc_only_var = tk.BooleanVar()
         ttk.Checkbutton(
             ctrl, text="Solo IOC hits", variable=self._hist_ioc_only_var
@@ -3903,6 +3928,10 @@ class MasterOfParserGUI:
         self._hist_tree.configure(yscrollcommand=hist_vsb.set)
         self._hist_tree.pack(side="left", fill="both", expand=True)
         hist_vsb.pack(side="right", fill="y")
+        self._hist_tree.bind(
+            "<Button-3>",
+            lambda e: self._show_tree_copy_menu(e, self._hist_tree),
+        )
 
         chart_frame = ttk.LabelFrame(right, text="Histograma", padding=4)
         right.add(chart_frame, weight=2)
@@ -3914,6 +3943,9 @@ class MasterOfParserGUI:
             self._hist_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
             self._hist_canvas_mpl.mpl_connect(
                 "button_press_event", self._on_hist_dblclick
+            )
+            self._hist_canvas_mpl.mpl_connect(
+                "button_press_event", self._on_hist_rightclick
             )
         else:
             self._hist_canvas_mpl = None
@@ -3969,6 +4001,7 @@ class MasterOfParserGUI:
             self._hist_topn_var,
             self._hist_topn_all,
             self._hist_exclude_empty_var,
+            self._hist_fill_gaps_var,
             self._hist_ioc_only_var,
         ]
         for var in tracked_vars:
@@ -4127,16 +4160,27 @@ class MasterOfParserGUI:
         return self._check_single_condition(raw_value, cell_value)
 
     def _check_single_condition(self, raw_value: str, cell_value: str) -> bool:
-        """Evalúa una condición simple (sin OR)."""
+        """Evalúa una condición simple (sin OR). Soporta *, ! y =."""
+        from fnmatch import fnmatch
+
         exact = raw_value.startswith("=")
         exclude = raw_value.startswith("!")
         cmp_value = raw_value[1:].strip() if (exact or exclude) else raw_value
         cmp_value = cmp_value.lower()
 
+        has_wildcard = "*" in cmp_value or "?" in cmp_value
+
         if exact:
+            if has_wildcard:
+                return fnmatch(cell_value, cmp_value)
             return cell_value == cmp_value
         if exclude:
+            if has_wildcard:
+                return not fnmatch(cell_value, cmp_value)
             return cmp_value not in cell_value
+        # Contiene (default) — con wildcard usa fnmatch
+        if has_wildcard:
+            return fnmatch(cell_value, cmp_value)
         return cmp_value in cell_value
 
     def _parse_time_bound(
@@ -4443,6 +4487,24 @@ class MasterOfParserGUI:
             else:
                 tree.insert("", "end", values=(lbl, disp, f"{val / total * 100:.1f}%"))
                 chart_labels.append(lbl)
+
+        # Si todos los labels comparten el mismo primario/secundario, simplificar
+        _chart_label_field = None  # qué campo representan los labels del gráfico
+        if secondary_idx is not None and chart_labels:
+            primaries = {lbl[0] for lbl in labels}
+            secondaries = {lbl[1] for lbl in labels}
+            if len(primaries) == 1:
+                # Todos misma red → mostrar solo el campo secundario
+                chart_labels = [lbl[1] for lbl in labels]
+                _chart_label_field = secondary_col
+            elif len(secondaries) == 1:
+                # Todos misma acción → mostrar solo el primario
+                chart_labels = [lbl[0] for lbl in labels]
+                _chart_label_field = col
+        if _chart_label_field is None:
+            _chart_label_field = col
+        self._last_chart_label_field = _chart_label_field
+        self._last_chart_labels = list(chart_labels)
 
         # ── Dibujar gráfico ───────────────────────────────────────────────────
         if self._canvas_mpl is not None:
@@ -5452,6 +5514,7 @@ class MasterOfParserGUI:
         # Capturar variables de tkinter antes de ceder el hilo principal
         exclude_empty = self._hist_exclude_empty_var.get()
         ioc_only = self._hist_ioc_only_var.get()
+        fill_gaps = self._hist_fill_gaps_var.get()
         topn_all = self._hist_topn_all.get()
         try:
             topn = int(self._hist_topn_var.get())
@@ -5546,6 +5609,39 @@ class MasterOfParserGUI:
                     series_names = ["Total"]
 
                 ordered_buckets = sorted(grouped.keys())
+
+                # Rellenar huecos temporales si está activado
+                if fill_gaps and len(ordered_buckets) >= 2:
+                    start, end = ordered_buckets[0], ordered_buckets[-1]
+                    if bucket == "Hora":
+                        step = timedelta(hours=1)
+                    elif bucket == "Día":
+                        step = timedelta(days=1)
+                    elif bucket == "Semana":
+                        step = timedelta(weeks=1)
+                    else:  # Mes
+                        step = None
+                    if step is not None:
+                        full_buckets = []
+                        cur = start
+                        while cur <= end:
+                            full_buckets.append(cur)
+                            cur += step
+                        ordered_buckets = full_buckets
+                    else:
+                        # Meses: incrementar mes a mes
+                        full_buckets = []
+                        cur = start
+                        while cur <= end:
+                            full_buckets.append(cur)
+                            y, m = cur.year, cur.month
+                            m += 1
+                            if m > 12:
+                                m = 1
+                                y += 1
+                            cur = cur.replace(year=y, month=m)
+                        ordered_buckets = full_buckets
+
                 labels = [_format_bucket(b, bucket) for b in ordered_buckets]
                 series_matrix = {
                     name: [grouped[b].get(name, 0.0) for b in ordered_buckets]
@@ -5714,6 +5810,128 @@ class MasterOfParserGUI:
         self._analysis_zoom_back_btn.configure(state="normal")
         self._canvas_mpl.draw_idle()
 
+    # ── Copiar imagen / datos al portapapeles ─────────────────────────────
+    def _copy_figure_to_clipboard(self, fig):
+        """Copia una Figure de matplotlib al portapapeles de Windows como BMP."""
+        try:
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+            buf.seek(0)
+            # Usar PIL si está disponible
+            from PIL import Image
+            img = Image.open(buf)
+            bmp_buf = io.BytesIO()
+            img.convert("RGB").save(bmp_buf, format="BMP")
+            bmp_data = bmp_buf.getvalue()[14:]  # skip BMP file header
+            bmp_buf.close()
+            buf.close()
+            import ctypes
+            CF_DIB = 8
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            user32.OpenClipboard(0)
+            user32.EmptyClipboard()
+            h = kernel32.GlobalAlloc(0x0042, len(bmp_data))
+            p = kernel32.GlobalLock(h)
+            ctypes.memmove(p, bmp_data, len(bmp_data))
+            kernel32.GlobalUnlock(h)
+            user32.SetClipboardData(CF_DIB, h)
+            user32.CloseClipboard()
+            self._set_global_progress(100, "Imagen copiada al portapapeles.")
+        except ImportError:
+            messagebox.showwarning(
+                "Pillow necesario",
+                "Instala Pillow para copiar imágenes:\n  pip install Pillow",
+            )
+        except Exception as exc:
+            messagebox.showerror("Error al copiar imagen", str(exc))
+
+    def _copy_tree_to_clipboard(self, tree: ttk.Treeview):
+        """Copia el contenido de un Treeview al portapapeles como texto tabular."""
+        cols = tree["columns"]
+        header_texts = [tree.heading(c, "text") for c in cols]
+        lines = ["\t".join(header_texts)]
+        for iid in tree.get_children():
+            vals = tree.item(iid, "values")
+            lines.append("\t".join(str(v) for v in vals))
+        text = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_global_progress(
+            100, f"Tabla copiada ({len(lines) - 1} filas)."
+        )
+
+    def _on_analysis_rightclick(self, event):
+        """Click derecho en gráfico → menú contextual."""
+        if event.button != 3:
+            return
+        # Construir menú
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(
+            label="📋  Copiar imagen",
+            command=lambda: self._copy_figure_to_clipboard(self._fig),
+        )
+        m.add_command(
+            label="📋  Copiar tabla pivot",
+            command=lambda: self._copy_tree_to_clipboard(self._pivot_tree),
+        )
+
+        # Drill-down solo si se clicó sobre una barra
+        bar_idx = None
+        if event.inaxes is not None:
+            stored_labels = getattr(self, "_last_chart_labels", [])
+            ax = event.inaxes
+            for p in ax.patches:
+                if p.contains(event)[0]:
+                    y_ticks = [t.get_text() for t in ax.get_yticklabels()]
+                    x_ticks = [t.get_text() for t in ax.get_xticklabels()]
+                    if y_ticks and any(y_ticks):
+                        bar_idx = int(round(p.get_y() + p.get_height() / 2))
+                    elif x_ticks and any(x_ticks):
+                        bar_idx = int(round(p.get_x() + p.get_width() / 2))
+                    break
+            if (
+                bar_idx is not None
+                and 0 <= bar_idx < len(stored_labels)
+            ):
+                clicked_label = stored_labels[bar_idx]
+                filter_field = getattr(self, "_last_chart_label_field", None)
+                if not filter_field:
+                    meta = self._last_pivot_meta
+                    filter_field = meta.get("secondary_col") or meta.get("col", "")
+                if filter_field:
+                    m.add_separator()
+                    m.add_command(
+                        label=f"🔍  Drill-down: {filter_field}={clicked_label}",
+                        command=lambda f=filter_field, v=clicked_label: self._do_drilldown(f, v),
+                    )
+
+        # Posicionar menú en coordenadas de pantalla
+        widget = self._canvas_mpl.get_tk_widget()
+        x_screen = widget.winfo_rootx() + int(event.x)
+        y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
+        m.tk_popup(x_screen, y_screen)
+
+    def _do_drilldown(self, filter_field: str, clicked_label: str):
+        """Aplica drill-down en Filtro 2."""
+        filter_value = f"={clicked_label}"
+        f2_field = self._analysis_filter2_field_var.get().strip()
+        f2_value = self._analysis_filter2_value_var.get().strip()
+        if not f2_value or f2_field == _NO_FILTER_FIELD:
+            self._analysis_filter2_field_var.set(filter_field)
+            self._analysis_filter2_value_var.set(filter_value)
+        else:
+            if messagebox.askyesno(
+                "Filtro 2 ocupado",
+                f"Filtro 2 ya tiene: {f2_field}={f2_value}\n\n"
+                f"¿Reemplazar con {filter_field}={clicked_label}?",
+            ):
+                self._analysis_filter2_field_var.set(filter_field)
+                self._analysis_filter2_value_var.set(filter_value)
+            else:
+                return
+        self._generate_pivot()
+
     def _on_hist_dblclick(self, event):
         if not getattr(event, "dblclick", False) or event.inaxes is None:
             return
@@ -5724,6 +5942,49 @@ class MasterOfParserGUI:
         self._zoom_axis(ax, event.xdata, event.ydata, zoom_factor=0.5)
         self._hist_zoom_back_btn.configure(state="normal")
         self._hist_canvas_mpl.draw_idle()
+
+    def _on_hist_rightclick(self, event):
+        """Menú contextual en histograma: copiar imagen / tabla."""
+        if event.button != 3:
+            return
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(
+            label="📋  Copiar imagen",
+            command=lambda: self._copy_figure_to_clipboard(self._hist_fig),
+        )
+        m.add_command(
+            label="📋  Copiar tabla series",
+            command=lambda: self._copy_tree_to_clipboard(self._hist_tree),
+        )
+        widget = self._hist_canvas_mpl.get_tk_widget()
+        x_screen = widget.winfo_rootx() + int(event.x)
+        y_screen = widget.winfo_rooty() + widget.winfo_height() - int(event.y)
+        m.tk_popup(x_screen, y_screen)
+
+    def _show_tree_copy_menu(self, event, tree: ttk.Treeview):
+        """Menú contextual para copiar contenido de un Treeview."""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(
+            label="📋  Copiar toda la tabla",
+            command=lambda: self._copy_tree_to_clipboard(tree),
+        )
+        # Copiar celda seleccionada
+        col_id = tree.identify_column(event.x)
+        row_id = tree.identify_row(event.y)
+        if row_id and col_id:
+            try:
+                col_idx = int(col_id.lstrip("#")) - 1
+                cell_value = str(tree.item(row_id, "values")[col_idx])
+                m.add_command(
+                    label=f'📋  Copiar celda: "{cell_value[:40]}"',
+                    command=lambda v=cell_value: (
+                        self.root.clipboard_clear(),
+                        self.root.clipboard_append(v),
+                    ),
+                )
+            except (ValueError, IndexError):
+                pass
+        m.tk_popup(event.x_root, event.y_root)
 
     def _analysis_zoom_back(self):
         if not self._analysis_zoom_stack or self._canvas_mpl is None:
@@ -5858,6 +6119,58 @@ class MasterOfParserGUI:
             traceback.print_exc()
             messagebox.showerror(
                 "Error al exportar histograma",
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _export_detail_csv(self):
+        """Exporta TODAS las filas que matchean los filtros actuales de Análisis."""
+        if not self._all_rows or not self._csv_columns:
+            messagebox.showwarning("Sin datos", "Carga primero un CSV.")
+            return
+        try:
+            rows = self._get_analysis_rows(self._all_rows)
+            if not rows:
+                messagebox.showinfo("Sin filas", "Los filtros actuales no devuelven filas.")
+                return
+
+            meta = self._last_pivot_meta
+            col = meta.get("col", "detalle")
+            secondary = meta.get("secondary_col")
+            base_name = f"detalle_{col}"
+            if secondary:
+                base_name += f"_{secondary}"
+            if meta.get("ioc_only"):
+                base_name += "_IOC"
+            vnd = meta.get("vendor_filter", "")
+            if vnd and vnd != "(todos)":
+                base_name += f"_{vnd}"
+            if meta.get("from_value"):
+                base_name += f"_desde{meta['from_value']}"
+            if meta.get("to_value"):
+                base_name += f"_hasta{meta['to_value']}"
+            base_name = self._safe_filename(base_name)
+            timestamp = datetime.now().strftime("%H%M%S")
+            base_name = f"{base_name}_{timestamp}"
+
+            folder = os.path.join(self._get_session_folder(), "graficas")
+            os.makedirs(folder, exist_ok=True)
+            csv_path = os.path.join(folder, f"{base_name}.csv")
+
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(self._csv_columns)
+                for row in rows:
+                    writer.writerow(row)
+
+            messagebox.showinfo(
+                "Detalle exportado",
+                f"{len(rows):,} filas exportadas a:\n{csv_path}",
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Error al exportar detalle",
                 f"{type(exc).__name__}: {exc}",
             )
 
