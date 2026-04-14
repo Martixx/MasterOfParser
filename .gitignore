@@ -16,3 +16,7 @@ ips_para_iocs.txt
 *.jpeg
 *.pdf
 *.svg
+# PyInstaller
+build/
+dist/
+*.spec
