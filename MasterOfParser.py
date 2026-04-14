@@ -48,6 +48,8 @@ except ImportError:
 
 try:
     import matplotlib
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
     matplotlib.use("TkAgg")
     from matplotlib.figure import Figure
@@ -1237,6 +1239,17 @@ _DERIVED_ANALYSIS_FIELDS = [
     "ioc_scope",
     "dest_port_band",
     "src_port_band",
+    "asn_src_reputation",
+    "asn_dst_reputation",
+    "asn_src_name",
+    "asn_dst_name",
+    "asn_src_country",
+    "asn_dst_country",
+    "asn_src_comments",
+    "asn_dst_comments",
+    "asn_src_source",
+    "asn_dst_source",
+    "asn_match",
 ]
 _PIVOT_METRICS = [
     "Recuento",
@@ -1660,6 +1673,94 @@ def _detect_spikes(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ASN list — carga y cruce
+# ─────────────────────────────────────────────────────────────────────────────
+_ASN_NUM_RE = re.compile(r"\b(\d{3,10})\b")
+
+
+def _extract_asn_number(asn_str: str) -> str:
+    """Extrae el número ASN de cadenas como 'AS 4134', 'AS4134 Chinanet', '4134'."""
+    m = _ASN_NUM_RE.search(str(asn_str or "").strip())
+    return m.group(1) if m else ""
+
+
+def load_asn_csv(path: str) -> dict[str, dict]:
+    """Carga asn_list.csv y devuelve {asn_number_str: {name, country, reputation, comments, source}}."""
+    asn_map: dict[str, dict] = {}
+    if not path or not os.path.isfile(path):
+        return asn_map
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header:
+            return asn_map
+        # Normalizar cabecera
+        h = [c.strip().lower() for c in header]
+
+        # Buscar índices por nombre (flexible)
+        def _idx(names):
+            for n in names:
+                for i, col in enumerate(h):
+                    if n in col:
+                        return i
+            return -1
+
+        idx_asn_label = 0  # primera columna siempre tiene "AS XXXX"
+        idx_country = _idx(["country", "país"])
+        idx_name = _idx(["nombre", "name"])
+        idx_rep = _idx(["reputaci", "reputation"])
+        idx_comments = _idx(["comentario", "comment"])
+        idx_source = _idx(["fuente", "source"])
+
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+            asn_num = _extract_asn_number(row[0])
+            if not asn_num:
+                continue
+            asn_map[asn_num] = {
+                "asn_label": row[0].strip() if len(row) > 0 else "",
+                "country": (
+                    row[idx_country].strip()
+                    if idx_country >= 0 and idx_country < len(row)
+                    else ""
+                ),
+                "name": (
+                    row[idx_name].strip()
+                    if idx_name >= 0 and idx_name < len(row)
+                    else ""
+                ),
+                "reputation": (
+                    row[idx_rep].strip() if idx_rep >= 0 and idx_rep < len(row) else ""
+                ),
+                "comments": (
+                    row[idx_comments].strip()
+                    if idx_comments >= 0 and idx_comments < len(row)
+                    else ""
+                ),
+                "source": (
+                    row[idx_source].strip()
+                    if idx_source >= 0 and idx_source < len(row)
+                    else ""
+                ),
+            }
+    return asn_map
+
+
+_ASN_REPUTATION_ORDER = {
+    "Malicious": 0,
+    "Bullet Proof": 1,
+    "Suspicious": 2,
+    "Clean (Abused)": 3,
+    "Clean": 4,
+}
+
+
+def _asn_reputation_rank(rep: str) -> int:
+    return _ASN_REPUTATION_ORDER.get(rep.strip(), 99)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GUI (tkinter) — se lanza cuando no hay argumentos en línea de comandos
 # ─────────────────────────────────────────────────────────────────────────────
 class MasterOfParserGUI:
@@ -1703,10 +1804,12 @@ class MasterOfParserGUI:
         self._tab_results = ttk.Frame(nb)
         self._tab_analysis = ttk.Frame(nb)
         self._tab_histograms = ttk.Frame(nb)
+        self._tab_asn = ttk.Frame(nb)
         nb.add(self._tab_parser, text="  Parser  ")
         nb.add(self._tab_results, text="  Resultados  ")
         nb.add(self._tab_analysis, text="  Análisis  ")
         nb.add(self._tab_histograms, text="  Histogramas  ")
+        nb.add(self._tab_asn, text="  ASN  ")
 
         status = ttk.Frame(root)
         status.pack(fill="x", side="bottom", padx=8, pady=(0, 8))
@@ -1721,6 +1824,9 @@ class MasterOfParserGUI:
         self._build_results_tab()
         self._build_analysis_tab()
         self._build_histograms_tab()
+        self._asn_map: dict[str, dict] = {}
+        self._asn_cross_results: dict[str, dict] = {}
+        self._build_asn_tab()
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _set_global_progress(self, value: int, text: str = ""):
@@ -3656,6 +3762,38 @@ class MasterOfParserGUI:
                 f2_field="src_zone",
                 f2_value="!wifi",
             ),
+            # ── ASN ─────────────────────────────────────────────────────
+            dict(
+                label="ASN dst reputación",
+                col="asn_dst_reputation",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
+            dict(
+                label="ASN src reputación",
+                col="asn_src_reputation",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
+            dict(
+                label="Top ASN dst (nombre)",
+                col="asn_dst_name",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="ASN dst / acción",
+                col="asn_dst_name",
+                secondary="action",
+                metric="Recuento",
+                chart="Barras horizontales",
+            ),
+            dict(
+                label="ASN match (src/dst)",
+                col="asn_match",
+                metric="Recuento",
+                chart="Quesito (pie)",
+            ),
         ]
         for p in presets:
             ttk.Button(
@@ -3676,7 +3814,10 @@ class MasterOfParserGUI:
 
         # ── Panel derecho: tabla + gráfico (separador arrastrable) ────────────
         right = tk.PanedWindow(
-            paned, orient=tk.VERTICAL, sashwidth=6, sashrelief="raised",
+            paned,
+            orient=tk.VERTICAL,
+            sashwidth=6,
+            sashrelief="raised",
             bg="#cccccc",
         )
         paned.add(right, weight=1)
@@ -3965,6 +4106,877 @@ class MasterOfParserGUI:
 
         # self._setup_hist_auto_refresh()  # Desactivado: solo bajo demanda
 
+    # ── Pestaña ASN ──────────────────────────────────────────────────────────
+    def _build_asn_tab(self):
+        tab = self._tab_asn
+
+        paned = ttk.PanedWindow(tab, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # ── Panel izquierdo: controles ───────────────────────────────────────
+        ctrl_outer = ttk.LabelFrame(paned, text="ASN Reputación", padding=0)
+        paned.add(ctrl_outer, weight=0)
+
+        _canvas = tk.Canvas(ctrl_outer, highlightthickness=0, width=240)
+        _vsb = ttk.Scrollbar(ctrl_outer, orient="vertical", command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side="right", fill="y")
+        _canvas.pack(side="left", fill="both", expand=True)
+
+        ctrl = ttk.Frame(_canvas, padding=8)
+        _canvas.create_window((0, 0), window=ctrl, anchor="nw")
+
+        def _on_ctrl_configure(_event=None):
+            _canvas.configure(scrollregion=_canvas.bbox("all"))
+
+        ctrl.bind("<Configure>", _on_ctrl_configure)
+
+        def _on_mousewheel(event):
+            _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            _canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            _canvas.unbind_all("<MouseWheel>")
+
+        _canvas.bind("<Enter>", _bind_mousewheel)
+        _canvas.bind("<Leave>", _unbind_mousewheel)
+
+        ttk.Label(
+            ctrl,
+            text="Carga una lista de ASN con\nreputación para cruzarla\ncon los datos CIM.",
+            foreground="#666666",
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Button(
+            ctrl,
+            text="📂  Cargar ASN CSV",
+            command=self._load_asn_csv,
+        ).pack(fill="x", pady=(0, 4))
+
+        self._asn_status_var = tk.StringVar(value="Sin lista ASN cargada.")
+        ttk.Label(ctrl, textvariable=self._asn_status_var, wraplength=220).pack(
+            anchor="w", pady=(0, 8)
+        )
+
+        ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(ctrl, text="Filtrar reputación:", font=("", 9, "bold")).pack(
+            anchor="w", pady=(4, 2)
+        )
+        # Checkboxes multi-select para reputación
+        self._asn_rep_mal_var = tk.BooleanVar(value=True)
+        self._asn_rep_bp_var = tk.BooleanVar(value=True)
+        self._asn_rep_sus_var = tk.BooleanVar(value=True)
+        self._asn_rep_ca_var = tk.BooleanVar(value=False)
+        self._asn_rep_clean_var = tk.BooleanVar(value=False)
+        for text, var in (
+            ("Malicious", self._asn_rep_mal_var),
+            ("Bullet Proof", self._asn_rep_bp_var),
+            ("Suspicious", self._asn_rep_sus_var),
+            ("Clean (Abused)", self._asn_rep_ca_var),
+            ("Clean", self._asn_rep_clean_var),
+        ):
+            ttk.Checkbutton(ctrl, text=text, variable=var).pack(anchor="w")
+
+        ttk.Label(ctrl, text="Filtrar ASN/nombre:").pack(anchor="w", pady=(4, 0))
+        self._asn_text_filter_var = tk.StringVar()
+        ttk.Entry(ctrl, textvariable=self._asn_text_filter_var, width=22).pack(
+            fill="x", pady=(0, 8)
+        )
+
+        ttk.Button(
+            ctrl,
+            text="🔎  Aplicar filtro",
+            command=self._render_asn_results,
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            ctrl,
+            text="🔄  Cruzar con datos CIM",
+            command=self._cross_asn_data,
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            ctrl,
+            text="📊  Enviar a Análisis",
+            command=self._send_asn_to_analysis,
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            ctrl,
+            text="📈  Enviar a Histogramas",
+            command=self._send_asn_to_histograms,
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            ctrl,
+            text="📋  Copiar tabla",
+            command=lambda: self._copy_tree_to_clipboard(self._asn_tree),
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            ctrl,
+            text="📥  Exportar (imagen + CSV)",
+            command=self._export_asn_chart,
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Label(ctrl, text="Resumen:", font=("", 9, "bold")).pack(
+            anchor="w", pady=(0, 4)
+        )
+        self._asn_summary_var = tk.StringVar(value="—")
+        ttk.Label(
+            ctrl,
+            textvariable=self._asn_summary_var,
+            wraplength=220,
+            foreground="#444444",
+            justify="left",
+        ).pack(anchor="w")
+
+        # Barra de progreso pequeña para cruce ASN
+        self._asn_progress_var = tk.IntVar(value=0)
+        self._asn_progress_bar = ttk.Progressbar(
+            ctrl, orient="horizontal", length=220, mode="determinate",
+            variable=self._asn_progress_var, maximum=100,
+        )
+        self._asn_progress_bar.pack(fill="x", pady=(4, 0))
+        self._asn_progress_bar.pack_forget()  # oculta hasta que se necesite
+
+        # ── Panel derecho: tabla + gráfico ───────────────────────────────────
+        right = tk.PanedWindow(
+            paned,
+            orient=tk.VERTICAL,
+            sashwidth=6,
+            sashrelief="raised",
+            bg="#cccccc",
+        )
+        paned.add(right, weight=1)
+
+        tbl_frame = ttk.LabelFrame(right, text="ASN × Datos CIM", padding=4)
+        right.add(tbl_frame, minsize=120, stretch="always")
+
+        self._asn_tree = ttk.Treeview(tbl_frame, show="headings", height=14)
+        asn_vsb = ttk.Scrollbar(
+            tbl_frame, orient="vertical", command=self._asn_tree.yview
+        )
+        asn_hsb = ttk.Scrollbar(
+            tbl_frame, orient="horizontal", command=self._asn_tree.xview
+        )
+        self._asn_tree.configure(yscrollcommand=asn_vsb.set, xscrollcommand=asn_hsb.set)
+        self._asn_tree.pack(side="left", fill="both", expand=True)
+        asn_vsb.pack(side="right", fill="y")
+        asn_hsb.pack(side="bottom", fill="x")
+        self._asn_tree.bind(
+            "<Button-3>",
+            lambda e: self._show_tree_copy_menu(e, self._asn_tree),
+        )
+        self._asn_tree.bind("<Double-1>", self._on_asn_tree_dblclick)
+
+        chart_frame = ttk.LabelFrame(right, text="Distribución ASN", padding=4)
+        right.add(chart_frame, minsize=120, stretch="always")
+
+        if _HAS_MPL:
+            self._asn_fig = Figure(figsize=(8.8, 4.5), dpi=110, facecolor="#ffffff")
+            self._asn_canvas_mpl = FigureCanvasTkAgg(self._asn_fig, master=chart_frame)
+            self._asn_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            self._asn_canvas_mpl.mpl_connect(
+                "button_press_event", self._on_asn_chart_rightclick
+            )
+        else:
+            self._asn_canvas_mpl = None
+            ttk.Label(
+                chart_frame,
+                text="matplotlib no disponible.",
+                justify="center",
+                foreground="gray",
+            ).pack(expand=True)
+
+    # ── ASN: cargar CSV ──────────────────────────────────────────────────────
+    def _load_asn_csv(self):
+        path = filedialog.askopenfilename(
+            title="Cargar lista de ASN (CSV)",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        asn_map = load_asn_csv(path)
+        if not asn_map:
+            messagebox.showwarning(
+                "ASN vacío", "No se pudieron leer ASN del fichero seleccionado."
+            )
+            return
+        self._asn_map = asn_map
+        # Contar por reputación
+        rep_counts: Counter = Counter()
+        for info in asn_map.values():
+            rep_counts[info.get("reputation", "?")] += 1
+        rep_summary = " | ".join(
+            f"{rep}: {cnt}" for rep, cnt in rep_counts.most_common()
+        )
+        self._asn_status_var.set(f"✅ {len(asn_map)} ASN cargados\n{rep_summary}")
+        # Mostrar la lista en la tabla
+        self._show_asn_list()
+        # Si ya hay datos CIM cargados, cruzar automáticamente
+        if self._all_rows and self._csv_columns:
+            self._cross_asn_data()
+
+    def _show_asn_list(self):
+        """Muestra la lista ASN cargada en el Treeview."""
+        tree = self._asn_tree
+        tree.delete(*tree.get_children())
+        tree["columns"] = (
+            "asn",
+            "nombre",
+            "país",
+            "reputación",
+            "comentarios",
+            "fuente",
+        )
+        for name, width in (
+            ("asn", 90),
+            ("nombre", 200),
+            ("país", 60),
+            ("reputación", 120),
+            ("comentarios", 400),
+            ("fuente", 120),
+        ):
+            tree.heading(name, text=name.capitalize())
+            tree.column(name, width=width, minwidth=50)
+
+        rep_filter = self._get_asn_rep_filter_set()
+        text_filter = self._asn_text_filter_var.get().strip().lower()
+
+        for asn_num, info in sorted(
+            self._asn_map.items(),
+            key=lambda x: _asn_reputation_rank(x[1].get("reputation", "")),
+        ):
+            rep = info.get("reputation", "")
+            if rep_filter and rep not in rep_filter:
+                continue
+            if text_filter:
+                search_text = f"{asn_num} {info.get('name', '')} {info.get('asn_label', '')}".lower()
+                if text_filter not in search_text:
+                    continue
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    info.get("asn_label", f"AS {asn_num}"),
+                    info.get("name", ""),
+                    info.get("country", ""),
+                    rep,
+                    info.get("comments", ""),
+                    info.get("source", ""),
+                ),
+            )
+
+    # ── ASN: cruzar con datos CIM ────────────────────────────────────────────
+    def _cross_asn_data(self):
+        if not self._asn_map:
+            messagebox.showwarning("Sin ASN", "Carga primero una lista de ASN (CSV).")
+            return
+        if not self._all_rows or not self._csv_columns:
+            messagebox.showwarning(
+                "Sin datos CIM", "Carga primero un CSV de resultados CIM."
+            )
+            return
+
+        cols = self._csv_columns
+        src_asn_idx = cols.index("ioc_src_asn") if "ioc_src_asn" in cols else -1
+        dst_asn_idx = cols.index("ioc_dst_asn") if "ioc_dst_asn" in cols else -1
+        ts_idx = cols.index("timestamp") if "timestamp" in cols else -1
+        src_ip_idx = cols.index("src_ip") if "src_ip" in cols else -1
+        dst_ip_idx = cols.index("dest_ip") if "dest_ip" in cols else -1
+        srcnet_idx = cols.index("source_network") if "source_network" in cols else -1
+
+        if src_asn_idx < 0 and dst_asn_idx < 0:
+            messagebox.showwarning(
+                "Sin columnas ASN",
+                "El CSV CIM no tiene ioc_src_asn / ioc_dst_asn.\n"
+                "Asegúrate de haber parseado con enriquecimiento IOC.",
+            )
+            return
+
+        # Agrupar hits por ASN
+        asn_hits: dict[str, dict] = {}  # asn_num -> stats
+        total_rows = len(self._all_rows)
+        last_pct = -1
+        self._asn_progress_var.set(0)
+        self._asn_progress_bar.pack(fill="x", pady=(4, 0))
+        self._asn_summary_var.set("Cruzando datos ASN…")
+        self.root.update_idletasks()
+
+        for i, row in enumerate(self._all_rows):
+            if total_rows > 0:
+                pct = (i * 100) // total_rows
+                if pct != last_pct and pct % 2 == 0:
+                    last_pct = pct
+                    self._asn_progress_var.set(pct)
+                    self._asn_summary_var.set(f"Cruzando datos ASN… {pct}%")
+                    self.root.update_idletasks()
+            for idx, direction in ((src_asn_idx, "src"), (dst_asn_idx, "dst")):
+                if idx < 0:
+                    continue
+                raw_asn = str(row[idx] or "").strip()
+                if not raw_asn:
+                    continue
+                asn_num = _extract_asn_number(raw_asn)
+                if not asn_num or asn_num not in self._asn_map:
+                    continue
+                if asn_num not in asn_hits:
+                    asn_hits[asn_num] = {
+                        "src_count": 0,
+                        "dst_count": 0,
+                        "ips_src": set(),
+                        "ips_dst": set(),
+                        "pairs": {},
+                        "first_seen": None,
+                        "last_seen": None,
+                    }
+                stats = asn_hits[asn_num]
+                # Extraer ambas IPs de la fila para el par
+                row_src = str(row[src_ip_idx] or "").strip() if src_ip_idx >= 0 else ""
+                row_dst = str(row[dst_ip_idx] or "").strip() if dst_ip_idx >= 0 else ""
+                row_srcnet = (
+                    str(row[srcnet_idx] or "").strip() if srcnet_idx >= 0 else ""
+                )
+                # Timestamp de esta fila
+                row_dt = None
+                if ts_idx >= 0:
+                    ts_val = str(row[ts_idx] or "").strip()
+                    row_dt = _parse_timestamp(ts_val)
+                if direction == "src":
+                    stats["src_count"] += 1
+                    if row_src:
+                        stats["ips_src"].add(row_src)
+                else:
+                    stats["dst_count"] += 1
+                    if row_dst:
+                        stats["ips_dst"].add(row_dst)
+                if row_src and row_dst:
+                    pair_key = (row_src, row_dst)
+                    if pair_key not in stats["pairs"]:
+                        stats["pairs"][pair_key] = {
+                            "hits": 0,
+                            "first_seen": None,
+                            "last_seen": None,
+                            "networks": set(),
+                        }
+                    pd = stats["pairs"][pair_key]
+                    pd["hits"] += 1
+                    if row_srcnet:
+                        pd["networks"].add(row_srcnet)
+                    if row_dt:
+                        if pd["first_seen"] is None or row_dt < pd["first_seen"]:
+                            pd["first_seen"] = row_dt
+                        if pd["last_seen"] is None or row_dt > pd["last_seen"]:
+                            pd["last_seen"] = row_dt
+                if row_dt:
+                    if stats["first_seen"] is None or row_dt < stats["first_seen"]:
+                        stats["first_seen"] = row_dt
+                    if stats["last_seen"] is None or row_dt > stats["last_seen"]:
+                        stats["last_seen"] = row_dt
+
+        # Ocultar barra de progreso ASN
+        self._asn_progress_var.set(100)
+        self._asn_progress_bar.pack_forget()
+
+        # Guardar resultados para detalle de IPs
+        self._asn_cross_results = asn_hits
+
+        # Renderizar tabla + gráfico con filtros actuales
+        self._render_asn_results()
+
+    def _get_asn_rep_filter_set(self) -> set[str]:
+        """Devuelve el set de reputaciones marcadas en los checkboxes."""
+        selected: set[str] = set()
+        if self._asn_rep_mal_var.get():
+            selected.add("Malicious")
+        if self._asn_rep_bp_var.get():
+            selected.add("Bullet Proof")
+        if self._asn_rep_sus_var.get():
+            selected.add("Suspicious")
+        if self._asn_rep_ca_var.get():
+            selected.add("Clean (Abused)")
+        if self._asn_rep_clean_var.get():
+            selected.add("Clean")
+        return selected
+
+    def _render_asn_results(self):
+        """Renderiza tabla + gráfico ASN desde _asn_cross_results aplicando filtros."""
+        asn_hits = self._asn_cross_results
+        if not asn_hits:
+            self._status_var.set("Cruza primero los datos ASN con CIM.")
+            return
+
+        tree = self._asn_tree
+        tree.delete(*tree.get_children())
+        tree["columns"] = (
+            "asn",
+            "nombre",
+            "reputación",
+            "hits_src",
+            "hits_dst",
+            "total",
+            "ips_src",
+            "ips_dst",
+            "primera_vez",
+            "ultima_vez",
+            "país",
+            "comentarios",
+            "fuente",
+        )
+        col_widths = {
+            "asn": 90,
+            "nombre": 180,
+            "reputación": 110,
+            "hits_src": 70,
+            "hits_dst": 70,
+            "total": 70,
+            "ips_src": 60,
+            "ips_dst": 60,
+            "primera_vez": 130,
+            "ultima_vez": 130,
+            "país": 50,
+            "comentarios": 350,
+            "fuente": 100,
+        }
+        for name, width in col_widths.items():
+            tree.heading(name, text=name.replace("_", " ").capitalize())
+            tree.column(name, width=width, minwidth=40)
+
+        rep_selected = self._get_asn_rep_filter_set()
+        text_filter = self._asn_text_filter_var.get().strip().lower()
+
+        sorted_asns = sorted(
+            asn_hits.items(),
+            key=lambda x: x[1]["src_count"] + x[1]["dst_count"],
+            reverse=True,
+        )
+
+        total_malicious_hits = 0
+        shown = 0
+        filtered_hits: dict[str, dict] = {}  # para el gráfico filtrado
+        for asn_num, stats in sorted_asns:
+            info = self._asn_map.get(asn_num, {})
+            rep = info.get("reputation", "")
+
+            # Filtro por reputación (checkboxes)
+            if rep_selected and rep not in rep_selected:
+                continue
+            if text_filter:
+                search_text = f"{asn_num} {info.get('name', '')} {info.get('asn_label', '')}".lower()
+                if text_filter not in search_text:
+                    continue
+
+            total = stats["src_count"] + stats["dst_count"]
+            first_s = (
+                stats["first_seen"].strftime("%Y-%m-%d %H:%M")
+                if stats["first_seen"]
+                else ""
+            )
+            last_s = (
+                stats["last_seen"].strftime("%Y-%m-%d %H:%M")
+                if stats["last_seen"]
+                else ""
+            )
+
+            if rep in ("Malicious", "Bullet Proof", "Suspicious"):
+                total_malicious_hits += total
+
+            filtered_hits[asn_num] = stats
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    info.get("asn_label", f"AS {asn_num}"),
+                    info.get("name", ""),
+                    rep,
+                    f"{stats['src_count']:,}",
+                    f"{stats['dst_count']:,}",
+                    f"{total:,}",
+                    f"{len(stats['ips_src']):,}",
+                    f"{len(stats['ips_dst']):,}",
+                    first_s,
+                    last_s,
+                    info.get("country", ""),
+                    info.get("comments", ""),
+                    info.get("source", ""),
+                ),
+            )
+            shown += 1
+
+        # Resumen
+        total_matched = len(asn_hits)
+        total_in_list = len(self._asn_map)
+        self._asn_summary_var.set(
+            f"ASN en datos: {total_matched} de {total_in_list}\n"
+            f"Hits maliciosos: {total_malicious_hits:,}\n"
+            f"Mostrando: {shown} ASN"
+        )
+
+        # Gráfico de distribución por reputación (solo los filtrados)
+        if self._asn_canvas_mpl is not None:
+            self._draw_asn_chart(filtered_hits)
+
+    def _draw_asn_chart(self, asn_hits: dict):
+        """Dibuja gráfico de barras con top ASN por hits, coloreados por reputación."""
+        self._asn_fig.clear()
+        ax = self._asn_fig.add_subplot(111)
+
+        rep_colors = {
+            "Malicious": "#e41a1c",
+            "Bullet Proof": "#984ea3",
+            "Suspicious": "#ff7f00",
+            "Clean (Abused)": "#377eb8",
+            "Clean": "#4daf4a",
+        }
+
+        # Top 20 ASN por total de hits
+        sorted_asns = sorted(
+            asn_hits.items(),
+            key=lambda x: x[1]["src_count"] + x[1]["dst_count"],
+            reverse=True,
+        )[:20]
+
+        if not sorted_asns:
+            ax.text(
+                0.5,
+                0.5,
+                "Sin matches ASN en los datos",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color="#999999",
+                transform=ax.transAxes,
+            )
+            self._asn_fig.tight_layout()
+            self._asn_canvas_mpl.draw()
+            return
+
+        labels = []
+        values_src = []
+        values_dst = []
+        colors = []
+        for asn_num, stats in sorted_asns:
+            info = self._asn_map.get(asn_num, {})
+            name = info.get("name", asn_num)
+            rep = info.get("reputation", "")
+            labels.append(_truncate_label(f"AS{asn_num} {name}", 30))
+            values_src.append(stats["src_count"])
+            values_dst.append(stats["dst_count"])
+            colors.append(rep_colors.get(rep, "#999999"))
+
+        y_pos = list(range(len(labels)))
+        ax.barh(
+            y_pos,
+            values_src,
+            color=colors,
+            alpha=0.85,
+            label="src",
+            height=0.4,
+            align="edge",
+        )
+        ax.barh(
+            [y - 0.4 for y in y_pos],
+            values_dst,
+            color=colors,
+            alpha=0.5,
+            label="dst",
+            height=0.4,
+            align="edge",
+        )
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.invert_yaxis()
+        ax.set_xlabel("Hits", fontsize=9)
+        ax.set_title(
+            "Top ASN por hits en datos CIM", fontsize=11, pad=10, color="#222222"
+        )
+        self._style_axis(ax, value_axis="x")
+
+        # Leyenda de reputación
+        from matplotlib.patches import Patch
+
+        legend_elements = [Patch(facecolor=c, label=r) for r, c in rep_colors.items()]
+        leg = ax.legend(
+            handles=legend_elements, fontsize=7, loc="lower right", framealpha=0.85
+        )
+        leg.set_draggable(True)
+
+        self._asn_fig.tight_layout()
+        self._asn_canvas_mpl.draw()
+
+    def _send_asn_to_analysis(self):
+        """Configura Análisis según ASN seleccionado o vista general, con filtro de reputación."""
+        if not self._asn_map:
+            messagebox.showwarning("Sin ASN", "Carga primero una lista ASN.")
+            return
+
+        # Construir filtro de reputación desde checkboxes
+        rep_selected = self._get_asn_rep_filter_set()
+        all_reps = {
+            "Malicious",
+            "Bullet Proof",
+            "Suspicious",
+            "Clean (Abused)",
+            "Clean",
+        }
+        has_rep_filter = rep_selected and rep_selected != all_reps
+        if has_rep_filter:
+            rep_filter_val = " OR ".join(f"={r}" for r in sorted(rep_selected))
+        else:
+            rep_filter_val = ""
+
+        # ¿Hay un ASN seleccionado en la tabla?
+        sel = self._asn_tree.selection()
+        if sel:
+            values = self._asn_tree.item(sel[0], "values")
+            if values:
+                asn_name = str(values[1]).strip()  # columna "nombre"
+                # Agrupar por dest_ip, desglosar por src_ip, filtrar por este ASN
+                self._pivot_col_var.set("dest_ip")
+                self._pivot_secondary_col_var.set("src_ip")
+                self._analysis_filter1_field_var.set("asn_dst_name")
+                self._analysis_filter1_value_var.set(f"={asn_name}")
+                if has_rep_filter:
+                    self._analysis_filter2_field_var.set("asn_dst_reputation")
+                    self._analysis_filter2_value_var.set(rep_filter_val)
+                else:
+                    self._analysis_filter2_field_var.set(_NO_FILTER_FIELD)
+                    self._analysis_filter2_value_var.set("")
+                self._nb.select(self._tab_analysis)
+                self._generate_pivot()
+                return
+
+        # Sin selección → vista general ASN
+        self._pivot_col_var.set("asn_dst_name")
+        self._pivot_secondary_col_var.set("dest_ip")
+        if has_rep_filter:
+            self._analysis_filter1_field_var.set("asn_dst_reputation")
+            self._analysis_filter1_value_var.set(rep_filter_val)
+        else:
+            self._analysis_filter1_field_var.set(_NO_FILTER_FIELD)
+            self._analysis_filter1_value_var.set("")
+        self._analysis_filter2_field_var.set(_NO_FILTER_FIELD)
+        self._analysis_filter2_value_var.set("")
+        self._nb.select(self._tab_analysis)
+
+    def _send_asn_to_histograms(self):
+        """Configura Histogramas para serie por ASN dst reputation con filtro de reputación."""
+        if not self._asn_map:
+            messagebox.showwarning("Sin ASN", "Carga primero una lista ASN.")
+            return
+        self._hist_series_col_var.set("asn_dst_reputation")
+
+        # Trasladar filtro de reputación seleccionado en checkboxes
+        rep_selected = self._get_asn_rep_filter_set()
+        all_reps = {
+            "Malicious",
+            "Bullet Proof",
+            "Suspicious",
+            "Clean (Abused)",
+            "Clean",
+        }
+        if rep_selected and rep_selected != all_reps:
+            # Construir filtro OR con match exacto
+            filter_val = " OR ".join(f"={r}" for r in sorted(rep_selected))
+            self._hist_filter1_field_var.set("asn_dst_reputation")
+            self._hist_filter1_value_var.set(filter_val)
+        else:
+            self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
+            self._hist_filter1_value_var.set("")
+
+        self._nb.select(self._tab_histograms)
+
+    def _on_asn_chart_rightclick(self, event):
+        """Clic derecho en gráfico ASN → menú copiar imagen."""
+        if event.button != 3:
+            return
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(
+            label="📋  Copiar imagen",
+            command=lambda: self._copy_figure_to_clipboard(self._asn_fig),
+        )
+        m.add_command(
+            label="📋  Copiar tabla ASN",
+            command=lambda: self._copy_tree_to_clipboard(self._asn_tree),
+        )
+        try:
+            widget = self._asn_canvas_mpl.get_tk_widget()
+            x = widget.winfo_rootx() + int(event.x)
+            y = widget.winfo_rooty() + int(
+                self._asn_fig.get_size_inches()[1] * self._asn_fig.dpi - event.y
+            )
+            m.tk_popup(x, y)
+        except Exception:
+            pass
+
+    def _export_asn_chart(self):
+        """Exporta gráfico ASN como imagen PNG + tabla como CSV."""
+        if not _HAS_MPL or self._asn_canvas_mpl is None:
+            messagebox.showwarning("Sin gráfico", "Genera primero un gráfico ASN.")
+            return
+        if not self._asn_fig.get_axes():
+            messagebox.showwarning("Sin gráfico", "Genera primero un gráfico ASN.")
+            return
+        try:
+            folder = os.path.join(self._get_session_folder(), "graficas")
+            os.makedirs(folder, exist_ok=True)
+            timestamp = datetime.now().strftime("%H%M%S")
+            base_name = f"asn_chart_{timestamp}"
+
+            # Imagen PNG
+            img_path = os.path.join(folder, f"{base_name}.png")
+            self._asn_fig.savefig(img_path, dpi=150, bbox_inches="tight")
+
+            # CSV con tabla ASN
+            csv_path = os.path.join(folder, f"{base_name}.csv")
+            tree = self._asn_tree
+            cols = tree["columns"]
+            header_texts = [tree.heading(c, "text") for c in cols]
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(header_texts)
+                for iid in tree.get_children():
+                    writer.writerow(tree.item(iid, "values"))
+
+            messagebox.showinfo(
+                "Exportado",
+                f"Gráfico ASN guardado en:\n{img_path}\n\nTabla ASN:\n{csv_path}",
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Error al exportar ASN",
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _on_asn_tree_dblclick(self, event):
+        """Doble-click en fila ASN → muestra pares src_ip ↔ dest_ip."""
+        sel = self._asn_tree.selection()
+        if not sel:
+            return
+        values = self._asn_tree.item(sel[0], "values")
+        if not values:
+            return
+        asn_label = str(values[0])  # e.g. "AS 57724"
+        asn_num = _extract_asn_number(asn_label)
+        if not asn_num or asn_num not in self._asn_cross_results:
+            return
+        stats = self._asn_cross_results[asn_num]
+        info = self._asn_map.get(asn_num, {})
+        name = info.get("name", asn_num)
+        rep = info.get("reputation", "")
+
+        # Ventana de detalle
+        win = tk.Toplevel(self.root)
+        win.title(f"Detalle ASN {asn_label} — {name}")
+        win.geometry("1050x540")
+        win.transient(self.root)
+
+        header = ttk.Label(
+            win,
+            text=f"{asn_label}  ·  {name}  ·  {rep}  ·  {info.get('country', '')}",
+            font=("", 11, "bold"),
+        )
+        header.pack(fill="x", padx=10, pady=(10, 4))
+
+        summary = ttk.Label(
+            win,
+            text=(
+                f"Hits src: {stats['src_count']:,}  |  Hits dst: {stats['dst_count']:,}  |  "
+                f"IPs src: {len(stats['ips_src']):,}  |  IPs dst: {len(stats['ips_dst']):,}  |  "
+                f"Pares únicos: {len(stats.get('pairs', {})):,}  |  "
+                f"Primera vez: {stats['first_seen'].strftime('%Y-%m-%d %H:%M') if stats['first_seen'] else '—'}  |  "
+                f"Última vez: {stats['last_seen'].strftime('%Y-%m-%d %H:%M') if stats['last_seen'] else '—'}"
+            ),
+            foreground="#555555",
+        )
+        summary.pack(fill="x", padx=10, pady=(0, 8))
+
+        # Tabla de pares src_ip ↔ dest_ip con fechas y source_network
+        pairs_frame = ttk.Frame(win)
+        pairs_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        _pair_cols = (
+            "src_ip",
+            "dest_ip",
+            "hits",
+            "primera_vez",
+            "ultima_vez",
+            "source_network",
+        )
+        pair_tree = ttk.Treeview(
+            pairs_frame,
+            show="headings",
+            columns=_pair_cols,
+            height=18,
+        )
+        pair_tree.heading("src_ip", text="IP Origen")
+        pair_tree.heading("dest_ip", text="IP Destino")
+        pair_tree.heading("hits", text="Hits")
+        pair_tree.heading("primera_vez", text="Primera vez")
+        pair_tree.heading("ultima_vez", text="Última vez")
+        pair_tree.heading("source_network", text="Source Network")
+        pair_tree.column("src_ip", width=140)
+        pair_tree.column("dest_ip", width=140)
+        pair_tree.column("hits", width=60, anchor="e")
+        pair_tree.column("primera_vez", width=130)
+        pair_tree.column("ultima_vez", width=130)
+        pair_tree.column("source_network", width=160)
+        pair_tree.pack(side="left", fill="both", expand=True)
+
+        pair_sb = ttk.Scrollbar(pairs_frame, orient="vertical", command=pair_tree.yview)
+        pair_tree.configure(yscrollcommand=pair_sb.set)
+        pair_sb.pack(side="right", fill="y")
+
+        pair_tree.bind(
+            "<Button-3>",
+            lambda e: self._show_tree_copy_menu(e, pair_tree),
+        )
+
+        pairs = stats.get("pairs", {})
+        for (src, dst), pd in sorted(
+            pairs.items(),
+            key=lambda x: -(x[1]["hits"] if isinstance(x[1], dict) else x[1]),
+        ):
+            if isinstance(pd, dict):
+                hits = pd["hits"]
+                first = (
+                    pd["first_seen"].strftime("%Y-%m-%d %H:%M")
+                    if pd.get("first_seen")
+                    else "—"
+                )
+                last = (
+                    pd["last_seen"].strftime("%Y-%m-%d %H:%M")
+                    if pd.get("last_seen")
+                    else "—"
+                )
+                nets = ", ".join(sorted(pd.get("networks", set())))
+            else:
+                hits, first, last, nets = pd, "—", "—", ""
+            pair_tree.insert(
+                "", "end", values=(src, dst, f"{hits:,}", first, last, nets)
+            )
+
+        # Botones
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            btn_frame,
+            text="📋 Copiar tabla pares",
+            command=lambda: self._copy_tree_to_clipboard(pair_tree),
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            btn_frame,
+            text="Cerrar",
+            command=win.destroy,
+        ).pack(side="right")
+
     def _setup_analysis_auto_refresh(self):
         tracked_vars = [
             self._pivot_col_var,
@@ -4125,10 +5137,44 @@ class MasterOfParserGUI:
         if field_name == "src_port_band":
             return _port_band(self._get_row_value(row, "src_port"))
 
+        # ── ASN virtual fields ───────────────────────────────────────────────
+        if field_name.startswith("asn_") and self._asn_map:
+            # Determinar dirección (src/dst) y campo deseado
+            if field_name.startswith("asn_src_"):
+                asn_raw = self._get_row_value(row, "ioc_src_asn")
+                asn_field = field_name[8:]  # after "asn_src_"
+            elif field_name.startswith("asn_dst_"):
+                asn_raw = self._get_row_value(row, "ioc_dst_asn")
+                asn_field = field_name[8:]  # after "asn_dst_"
+            elif field_name == "asn_match":
+                src_asn = _extract_asn_number(self._get_row_value(row, "ioc_src_asn"))
+                dst_asn = _extract_asn_number(self._get_row_value(row, "ioc_dst_asn"))
+                src_hit = src_asn in self._asn_map if src_asn else False
+                dst_hit = dst_asn in self._asn_map if dst_asn else False
+                if src_hit and dst_hit:
+                    return "src+dst"
+                if src_hit:
+                    return "src"
+                if dst_hit:
+                    return "dst"
+                return "none"
+            else:
+                return ""
+            asn_num = _extract_asn_number(asn_raw)
+            if asn_num and asn_num in self._asn_map:
+                info = self._asn_map[asn_num]
+                return info.get(asn_field, "")
+            return ""
+
         return ""
 
     def _field_exists_for_analysis(self, field_name: str) -> bool:
-        return field_name in self._csv_columns or field_name in _DERIVED_ANALYSIS_FIELDS
+        if field_name in self._csv_columns or field_name in _DERIVED_ANALYSIS_FIELDS:
+            return True
+        # ASN virtual fields exist only when ASN map is loaded
+        if field_name.startswith("asn_") and self._asn_map:
+            return True
+        return False
 
     def _apply_generic_filter(
         self, row: list, field_name: str, filter_value: str
@@ -4136,6 +5182,22 @@ class MasterOfParserGUI:
         if not field_name or field_name == _NO_FILTER_FIELD or not filter_value:
             return True
         raw_value = str(filter_value or "").strip()
+
+        # "(todas)" → búsqueda global en todas las columnas
+        if field_name == "(todas)":
+            if raw_value.startswith("="):
+                cmp_val = raw_value[1:].strip()
+                return any(
+                    self._check_single_condition(f"={cmp_val}", str(v).strip().lower())
+                    for v in row
+                )
+            elif raw_value.startswith("!"):
+                row_text = " | ".join(str(v) for v in row).lower()
+                return self._check_single_condition(raw_value, row_text)
+            else:
+                row_text = " | ".join(str(v) for v in row).lower()
+                return self._check_single_condition(raw_value, row_text)
+
         cell_value = self._get_row_value(row, field_name).lower()
 
         # Detectar OR (case-insensitive)
@@ -4981,7 +6043,26 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=10, color="#222222")
-        self._fig.tight_layout()
+
+        # Adaptar leyenda según número de series
+        n_series = len(secondary_labels)
+        if n_series > 15:
+            # Demasiadas series → quitar leyenda (los datos están en la tabla pivot)
+            leg.remove()
+            ax.annotate(
+                f"{n_series} series — ver tabla pivot",
+                xy=(0.99, 0.97), xycoords="axes fraction",
+                ha="right", va="top", fontsize=7, color="#888888",
+                fontstyle="italic",
+            )
+        else:
+            leg.set_draggable(True)
+
+        try:
+            self._fig.tight_layout()
+        except Exception:
+            pass
+
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
         if hasattr(self, "_analysis_zoom_back_btn"):
@@ -5815,6 +6896,7 @@ class MasterOfParserGUI:
         """Copia una Figure de matplotlib al portapapeles de Windows."""
         import subprocess
         import tempfile
+
         try:
             tmp = os.path.join(tempfile.gettempdir(), "_mop_clipboard.png")
             fig.savefig(tmp, format="png", dpi=150, bbox_inches="tight")
@@ -5828,7 +6910,8 @@ class MasterOfParserGUI:
             )
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             self._set_global_progress(100, "Imagen copiada al portapapeles.")
         except Exception as exc:
@@ -5845,9 +6928,7 @@ class MasterOfParserGUI:
         text = "\n".join(lines)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self._set_global_progress(
-            100, f"Tabla copiada ({len(lines) - 1} filas)."
-        )
+        self._set_global_progress(100, f"Tabla copiada ({len(lines) - 1} filas).")
 
     def _on_analysis_rightclick(self, event):
         """Click derecho en gráfico → menú contextual."""
@@ -5878,10 +6959,7 @@ class MasterOfParserGUI:
                     elif x_ticks and any(x_ticks):
                         bar_idx = int(round(p.get_x() + p.get_width() / 2))
                     break
-            if (
-                bar_idx is not None
-                and 0 <= bar_idx < len(stored_labels)
-            ):
+            if bar_idx is not None and 0 <= bar_idx < len(stored_labels):
                 clicked_label = stored_labels[bar_idx]
                 filter_field = getattr(self, "_last_chart_label_field", None)
                 if not filter_field:
@@ -5891,7 +6969,9 @@ class MasterOfParserGUI:
                     m.add_separator()
                     m.add_command(
                         label=f"🔍  Drill-down: {filter_field}={clicked_label}",
-                        command=lambda f=filter_field, v=clicked_label: self._do_drilldown(f, v),
+                        command=lambda f=filter_field, v=clicked_label: self._do_drilldown(
+                            f, v
+                        ),
                     )
 
         # Posicionar menú en coordenadas de pantalla
@@ -6124,7 +7204,9 @@ class MasterOfParserGUI:
         try:
             rows = self._get_analysis_rows(self._all_rows)
             if not rows:
-                messagebox.showinfo("Sin filas", "Los filtros actuales no devuelven filas.")
+                messagebox.showinfo(
+                    "Sin filas", "Los filtros actuales no devuelven filas."
+                )
                 return
 
             meta = self._last_pivot_meta
@@ -6162,6 +7244,7 @@ class MasterOfParserGUI:
             )
         except Exception as exc:
             import traceback
+
             traceback.print_exc()
             messagebox.showerror(
                 "Error al exportar detalle",
