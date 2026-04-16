@@ -2115,16 +2115,24 @@ class MasterOfParserGUI:
     def _build_results_tab(self):
         tab = self._tab_results
 
-        # Controles superiores
+        # ── Fila 1: barra de filtro (ancho completo) ──
+        filter_row = ttk.Frame(tab)
+        filter_row.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(filter_row, text="Filtrar:").pack(side="left")
+        self._filter_var = tk.StringVar()
+        filter_entry = ttk.Entry(filter_row, textvariable=self._filter_var)
+        filter_entry.pack(side="left", padx=4, expand=True, fill="x")
+        filter_entry.bind("<Return>", lambda _: self._apply_filter())
+        ttk.Button(
+            filter_row, text="✕", width=3,
+            command=lambda: self._filter_var.set(""),
+        ).pack(side="left")
+
+        # ── Fila 2: botones y controles ──
         ctrl = ttk.Frame(tab)
-        ctrl.pack(fill="x", padx=8, pady=6)
+        ctrl.pack(fill="x", padx=8, pady=(0, 2))
         ttk.Button(ctrl, text="Cargar CSV…", command=self._load_csv).pack(side="left")
         ttk.Separator(ctrl, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Label(ctrl, text="Filtrar:").pack(side="left")
-        self._filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(ctrl, textvariable=self._filter_var, width=25)
-        filter_entry.pack(side="left", padx=4)
-        filter_entry.bind("<Return>", lambda _: self._add_result_filter())
         ttk.Label(ctrl, text="en columna:").pack(side="left")
         self._filter_col_var = tk.StringVar(value="(todas)")
         self._filter_col_cb = ttk.Combobox(
@@ -2156,7 +2164,10 @@ class MasterOfParserGUI:
             width=3,
             command=lambda: self._open_calendar_popup(self._results_to_var),
         ).pack(side="left")
-        ttk.Button(ctrl, text="Añadir filtro", command=self._add_result_filter).pack(
+        ttk.Button(ctrl, text="🔍 Buscar", command=self._apply_filter).pack(
+            side="left", padx=4
+        )
+        ttk.Button(ctrl, text="⏹ Parar", command=self._cancel_filter).pack(
             side="left"
         )
         ttk.Button(ctrl, text="Limpiar", command=self._clear_filter).pack(
@@ -2170,9 +2181,13 @@ class MasterOfParserGUI:
         ttk.Button(ctrl, text="Columnas…", command=self._open_column_selector).pack(
             side="left", padx=(6, 0)
         )
+        ttk.Button(
+            ctrl, text="💾 Descargar CSV", command=self._download_filtered_csv
+        ).pack(side="left", padx=(6, 0))
 
+        # ── Fila 3: chips de filtros activos ──
         chips_row = ttk.Frame(tab)
-        chips_row.pack(fill="x", padx=8, pady=(0, 6))
+        chips_row.pack(fill="x", padx=8, pady=(0, 4))
         ttk.Label(chips_row, text="Filtros activos:").pack(side="left")
         self._results_filters_frame = ttk.Frame(chips_row)
         self._results_filters_frame.pack(side="left", fill="x", expand=True, padx=6)
@@ -2666,13 +2681,14 @@ class MasterOfParserGUI:
                     cols = df.columns.tolist()
                     rows = df.values.tolist()
                 else:
+                    df = None
                     rows = []
                     with open(path, encoding="utf-8-sig", errors="replace") as f:
                         reader = csv.DictReader(f)
                         cols = list(reader.fieldnames or [])
                         for row in reader:
                             rows.append([row.get(c, "") for c in cols])
-                self.root.after(0, lambda: self._finish_csv_load(path, cols, rows))
+                self.root.after(0, lambda: self._finish_csv_load(path, cols, rows, df))
             except Exception as exc:
                 self.root.after(
                     0,
@@ -2684,7 +2700,7 @@ class MasterOfParserGUI:
 
         threading.Thread(target=_read, daemon=True).start()
 
-    def _finish_csv_load(self, path: str, cols: list, rows: list):
+    def _finish_csv_load(self, path: str, cols: list, rows: list, df=None):
         self._set_global_progress(50, f"Preparando tabla... ({os.path.basename(path)})")
         self._loaded_csv_path = path
         self._last_output = path  # compartir con todas las pestañas
@@ -2692,11 +2708,8 @@ class MasterOfParserGUI:
         self._display_columns = list(cols)
         self._hidden_columns = set()
         self._all_rows = rows
-        # Cache DataFrame para operaciones rápidas
-        if _HAS_PANDAS:
-            self._df = pd.DataFrame(rows, columns=cols)
-        else:
-            self._df = None
+        # Cache DataFrame (ya creado en hilo de lectura si pandas disponible)
+        self._df = df
         self._sort_col = ""
         self._sort_asc = True
         self._setup_tree(cols, rows)
@@ -2706,6 +2719,7 @@ class MasterOfParserGUI:
         self._results_from_var.set("")
         self._results_to_var.set("")
         self._results_filters = []
+        self._filter_cancelled = False
         self._render_result_filter_chips()
         # Actualizar comboboxes en Análisis e Histogramas
         extra = [c for c in cols if c not in _PIVOT_FIELDS]
@@ -2742,7 +2756,12 @@ class MasterOfParserGUI:
 
     def _setup_tree(self, cols, rows):
         tree = self._tree
-        tree.delete(*tree.get_children())
+        # Limpiar tree: detach es más rápido que delete con muchos items
+        children = tree.get_children()
+        if children:
+            tree.detach(*children)
+            for cid in children:
+                tree.delete(cid)
         tree["columns"] = cols
 
         desired_display = [
@@ -2773,30 +2792,47 @@ class MasterOfParserGUI:
                     minwidth=60,
                     stretch=False,
                 )
-        # Inserción por lotes para no congelar la GUI
-        self._tree_batch_rows = rows
-        self._tree_batch_idx = 0
-        self._insert_tree_batch()
-
-    def _insert_tree_batch(self):
-        """Inserta filas en el Treeview en lotes de 500 para mantener la GUI responsiva."""
-        BATCH = 500
-        tree = self._tree
-        rows = self._tree_batch_rows
-        start = self._tree_batch_idx
-        end = min(start + BATCH, len(rows))
-        for i in range(start, end):
+        # ── Lazy loading: insertar primeras filas al instante, resto en background
+        self._tree_virtual_rows = rows
+        self._tree_loaded_count = 0
+        INITIAL = 2000
+        end = min(INITIAL, len(rows))
+        for i in range(end):
             tree.insert("", "end", values=rows[i])
-        self._tree_batch_idx = end
+        self._tree_loaded_count = end
         if end < len(rows):
-            pct = int(end * 100 / len(rows))
             self._set_global_progress(
-                pct, f"Cargando tabla... {pct}% ({end:,}/{len(rows):,})"
+                int(end * 100 / len(rows)),
+                f"Tabla: {end:,}/{len(rows):,} filas (cargando resto...)",
             )
-            self.root.after(1, self._insert_tree_batch)
+            self.root.after(10, self._insert_background_batch)
         else:
-            self._tree_batch_rows = None
             self._finish_global_progress(f"Tabla cargada · {len(rows):,} filas")
+
+    def _insert_background_batch(self):
+        """Inserta filas restantes en background, lotes de 3000 con after(1)."""
+        if getattr(self, "_filter_cancelled", False):
+            self._finish_global_progress("Carga cancelada")
+            return
+        rows = getattr(self, "_tree_virtual_rows", None)
+        if not rows:
+            return
+        loaded = self._tree_loaded_count
+        total = len(rows)
+        if loaded >= total:
+            return
+        BATCH = 3000
+        end = min(loaded + BATCH, total)
+        tree = self._tree
+        for i in range(loaded, end):
+            tree.insert("", "end", values=rows[i])
+        self._tree_loaded_count = end
+        if end < total:
+            pct = int(end * 100 / total)
+            self._set_global_progress(pct, f"Tabla: {end:,}/{total:,} filas cargadas")
+            self.root.after(1, self._insert_background_batch)
+        else:
+            self._finish_global_progress(f"Tabla completa · {total:,} filas")
 
     def _open_calendar_popup(self, target_var: "tk.StringVar"):
         popup = tk.Toplevel(self.root)
@@ -2921,20 +2957,28 @@ class MasterOfParserGUI:
         value = self._filter_var.get().strip()
         field = self._filter_col_var.get().strip()
         if not value:
+            # Sin texto, aplicar directamente (por si hay fechas)
             self._apply_filter()
             return
         self._results_filters.append({"field": field or "(todas)", "value": value})
         self._filter_var.set("")
         self._render_result_filter_chips()
-        self._apply_filter()
+        # No auto-apply: el usuario pulsa '🔍 Buscar' cuando esté listo
 
     def _remove_result_filter(self, idx: int):
         if 0 <= idx < len(self._results_filters):
             del self._results_filters[idx]
         self._render_result_filter_chips()
-        self._apply_filter()
 
     def _apply_filter(self):
+        self._filter_cancelled = False
+        # Auto-agregar texto pendiente del entry
+        pending = self._filter_var.get().strip()
+        if pending:
+            field = self._filter_col_var.get().strip()
+            self._results_filters.append({"field": field or "(todas)", "value": pending})
+            self._filter_var.set("")
+            self._render_result_filter_chips()
         has_dates = bool(
             self._results_from_var.get().strip() or self._results_to_var.get().strip()
         )
@@ -2943,6 +2987,8 @@ class MasterOfParserGUI:
             self._status_var.set(f"{len(self._all_rows):,} filas (sin filtro)")
             return
 
+        self._status_var.set("Filtrando…")
+        self.root.update_idletasks()
         filtered = []
         start_dt = self._parse_time_bound(
             self._results_from_var.get().strip(), is_end=False
@@ -2954,34 +3000,19 @@ class MasterOfParserGUI:
             else -1
         )
 
-        for row in self._all_rows:
+        for idx, row in enumerate(self._all_rows):
+            if idx % 5000 == 0:
+                self.root.update()
+                if self._filter_cancelled:
+                    self._status_var.set(
+                        f"Búsqueda cancelada · {len(filtered):,} filas parciales"
+                    )
+                    return
             ok = True
             for filter_item in self._results_filters:
                 field = filter_item.get("field", "(todas)")
                 value = filter_item.get("value", "")
-                if field == "(todas)":
-                    row_text = " | ".join(str(v) for v in row).lower()
-                    test_value = str(value or "").strip()
-                    if test_value.startswith("="):
-                        # Exacto: al menos una celda debe matchear
-                        cmp_val = test_value[1:].strip()
-                        if not any(
-                            self._check_single_condition(f"={cmp_val}", str(v).lower())
-                            for v in row
-                        ):
-                            ok = False
-                            break
-                    elif test_value.startswith("!"):
-                        # Excluir: row_text NO debe contener
-                        if not self._check_single_condition(test_value, row_text):
-                            ok = False
-                            break
-                    else:
-                        # Contiene / wildcard
-                        if not self._check_single_condition(test_value, row_text):
-                            ok = False
-                            break
-                elif not self._apply_generic_filter(row, field, value):
+                if not self._apply_generic_filter(row, field, value):
                     ok = False
                     break
             if not ok:
@@ -2998,6 +3029,11 @@ class MasterOfParserGUI:
                     continue
             filtered.append(row)
 
+        if self._filter_cancelled:
+            self._status_var.set(
+                f"Búsqueda cancelada · {len(filtered):,} filas parciales"
+            )
+            return
         self._setup_tree(self._csv_columns, filtered)
         extra = []
         if start_dt:
@@ -3010,6 +3046,7 @@ class MasterOfParserGUI:
         )
 
     def _clear_filter(self):
+        self._filter_cancelled = True
         self._filter_var.set("")
         self._results_from_var.set("")
         self._results_to_var.set("")
@@ -3017,6 +3054,9 @@ class MasterOfParserGUI:
         self._render_result_filter_chips()
         self._setup_tree(self._csv_columns, self._all_rows)
         self._status_var.set(f"{len(self._all_rows):,} filas (sin filtro)")
+
+    def _cancel_filter(self):
+        self._filter_cancelled = True
 
     def _on_tree_rclick(self, event):
         """Menú contextual en la tabla de Resultados."""
@@ -3118,6 +3158,46 @@ class MasterOfParserGUI:
             self._display_columns[idx],
         )
         self._tree["displaycolumns"] = self._display_columns
+
+    def _download_filtered_csv(self):
+        """Exporta las filas visibles (filtradas) del Treeview a CSV."""
+        rows = getattr(self, "_tree_virtual_rows", None) or []
+        if not rows:
+            messagebox.showinfo("Sin datos", "No hay filas para exportar.")
+            return
+        # Construir nombre por defecto a partir de los filtros activos
+        filters = getattr(self, "_results_filters", [])
+        if filters:
+            parts = []
+            for f in filters:
+                val = f.get("value", "").strip()
+                if val:
+                    clean = "".join(c if c.isalnum() or c in ".-_ " else "_" for c in val)
+                    parts.append(clean.strip())
+            default_name = "_".join(parts)[:120] if parts else "filtered"
+        else:
+            default_name = "filtered"
+        path = filedialog.asksaveasfilename(
+            title="Guardar CSV filtrado",
+            defaultextension=".csv",
+            initialfile=f"{default_name}.csv",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        all_cols = list(self._tree["columns"])
+        display = list(self._tree["displaycolumns"])
+        if display and display != ["#all"]:
+            cols = display
+        else:
+            cols = all_cols
+        col_indices = {c: i for i, c in enumerate(all_cols)}
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(cols)
+            for row in rows:
+                writer.writerow([row[col_indices[c]] if c in col_indices and col_indices[c] < len(row) else "" for c in cols])
+        messagebox.showinfo("Exportado", f"CSV guardado: {os.path.basename(path)}\n{len(rows):,} filas.")
 
     def _open_column_selector(self):
         """Selector para mostrar/ocultar columnas visibles en Resultados."""
@@ -4062,7 +4142,9 @@ class MasterOfParserGUI:
 
         tbl_frame = ttk.LabelFrame(right, text="Series", padding=4)
         right.add(tbl_frame, weight=1)
-        self._hist_tree = ttk.Treeview(tbl_frame, show="headings", height=8)
+        self._hist_tree = ttk.Treeview(
+            tbl_frame, show="headings", height=8, selectmode="extended"
+        )
         hist_vsb = ttk.Scrollbar(
             tbl_frame, orient="vertical", command=self._hist_tree.yview
         )
@@ -4073,6 +4155,7 @@ class MasterOfParserGUI:
             "<Button-3>",
             lambda e: self._show_tree_copy_menu(e, self._hist_tree),
         )
+        self._hist_tree.bind("<<TreeviewSelect>>", self._on_hist_series_select)
 
         chart_frame = ttk.LabelFrame(right, text="Histograma", padding=4)
         right.add(chart_frame, weight=2)
@@ -4399,94 +4482,96 @@ class MasterOfParserGUI:
             )
             return
 
-        # Agrupar hits por ASN
-        asn_hits: dict[str, dict] = {}  # asn_num -> stats
-        total_rows = len(self._all_rows)
-        last_pct = -1
         self._asn_progress_var.set(0)
         self._asn_progress_bar.pack(fill="x", pady=(4, 0))
         self._asn_summary_var.set("Cruzando datos ASN…")
-        self.root.update_idletasks()
 
-        for i, row in enumerate(self._all_rows):
-            if total_rows > 0:
-                pct = (i * 100) // total_rows
-                if pct != last_pct and pct % 2 == 0:
-                    last_pct = pct
-                    self._asn_progress_var.set(pct)
-                    self._asn_summary_var.set(f"Cruzando datos ASN… {pct}%")
-                    self.root.update_idletasks()
-            for idx, direction in ((src_asn_idx, "src"), (dst_asn_idx, "dst")):
-                if idx < 0:
-                    continue
-                raw_asn = str(row[idx] or "").strip()
-                if not raw_asn:
-                    continue
-                asn_num = _extract_asn_number(raw_asn)
-                if not asn_num or asn_num not in self._asn_map:
-                    continue
-                if asn_num not in asn_hits:
-                    asn_hits[asn_num] = {
-                        "src_count": 0,
-                        "dst_count": 0,
-                        "ips_src": set(),
-                        "ips_dst": set(),
-                        "pairs": {},
-                        "first_seen": None,
-                        "last_seen": None,
-                    }
-                stats = asn_hits[asn_num]
-                # Extraer ambas IPs de la fila para el par
-                row_src = str(row[src_ip_idx] or "").strip() if src_ip_idx >= 0 else ""
-                row_dst = str(row[dst_ip_idx] or "").strip() if dst_ip_idx >= 0 else ""
-                row_srcnet = (
-                    str(row[srcnet_idx] or "").strip() if srcnet_idx >= 0 else ""
-                )
-                # Timestamp de esta fila
-                row_dt = None
-                if ts_idx >= 0:
-                    ts_val = str(row[ts_idx] or "").strip()
-                    row_dt = _parse_timestamp(ts_val)
-                if direction == "src":
-                    stats["src_count"] += 1
-                    if row_src:
-                        stats["ips_src"].add(row_src)
-                else:
-                    stats["dst_count"] += 1
-                    if row_dst:
-                        stats["ips_dst"].add(row_dst)
-                if row_src and row_dst:
-                    pair_key = (row_src, row_dst)
-                    if pair_key not in stats["pairs"]:
-                        stats["pairs"][pair_key] = {
-                            "hits": 0,
+        def _worker():
+            asn_hits: dict[str, dict] = {}
+            all_rows = self._all_rows
+            asn_map = self._asn_map
+            total_rows = len(all_rows)
+            last_pct = -1
+
+            for i, row in enumerate(all_rows):
+                if total_rows > 0:
+                    pct = (i * 100) // total_rows
+                    if pct != last_pct and pct % 5 == 0:
+                        last_pct = pct
+                        self.root.after(0, lambda p=pct: (
+                            self._asn_progress_var.set(p),
+                            self._asn_summary_var.set(f"Cruzando datos ASN… {p}%"),
+                        ))
+                for idx, direction in ((src_asn_idx, "src"), (dst_asn_idx, "dst")):
+                    if idx < 0:
+                        continue
+                    raw_asn = str(row[idx] or "").strip()
+                    if not raw_asn:
+                        continue
+                    asn_num = _extract_asn_number(raw_asn)
+                    if not asn_num or asn_num not in asn_map:
+                        continue
+                    if asn_num not in asn_hits:
+                        asn_hits[asn_num] = {
+                            "src_count": 0,
+                            "dst_count": 0,
+                            "ips_src": set(),
+                            "ips_dst": set(),
+                            "pairs": {},
                             "first_seen": None,
                             "last_seen": None,
-                            "networks": set(),
                         }
-                    pd = stats["pairs"][pair_key]
-                    pd["hits"] += 1
-                    if row_srcnet:
-                        pd["networks"].add(row_srcnet)
+                    stats = asn_hits[asn_num]
+                    row_src = str(row[src_ip_idx] or "").strip() if src_ip_idx >= 0 else ""
+                    row_dst = str(row[dst_ip_idx] or "").strip() if dst_ip_idx >= 0 else ""
+                    row_srcnet = (
+                        str(row[srcnet_idx] or "").strip() if srcnet_idx >= 0 else ""
+                    )
+                    row_dt = None
+                    if ts_idx >= 0:
+                        ts_val = str(row[ts_idx] or "").strip()
+                        row_dt = _parse_timestamp(ts_val)
+                    if direction == "src":
+                        stats["src_count"] += 1
+                        if row_src:
+                            stats["ips_src"].add(row_src)
+                    else:
+                        stats["dst_count"] += 1
+                        if row_dst:
+                            stats["ips_dst"].add(row_dst)
+                    if row_src and row_dst:
+                        pair_key = (row_src, row_dst)
+                        if pair_key not in stats["pairs"]:
+                            stats["pairs"][pair_key] = {
+                                "hits": 0,
+                                "first_seen": None,
+                                "last_seen": None,
+                                "networks": set(),
+                            }
+                        pd = stats["pairs"][pair_key]
+                        pd["hits"] += 1
+                        if row_srcnet:
+                            pd["networks"].add(row_srcnet)
+                        if row_dt:
+                            if pd["first_seen"] is None or row_dt < pd["first_seen"]:
+                                pd["first_seen"] = row_dt
+                            if pd["last_seen"] is None or row_dt > pd["last_seen"]:
+                                pd["last_seen"] = row_dt
                     if row_dt:
-                        if pd["first_seen"] is None or row_dt < pd["first_seen"]:
-                            pd["first_seen"] = row_dt
-                        if pd["last_seen"] is None or row_dt > pd["last_seen"]:
-                            pd["last_seen"] = row_dt
-                if row_dt:
-                    if stats["first_seen"] is None or row_dt < stats["first_seen"]:
-                        stats["first_seen"] = row_dt
-                    if stats["last_seen"] is None or row_dt > stats["last_seen"]:
-                        stats["last_seen"] = row_dt
+                        if stats["first_seen"] is None or row_dt < stats["first_seen"]:
+                            stats["first_seen"] = row_dt
+                        if stats["last_seen"] is None or row_dt > stats["last_seen"]:
+                            stats["last_seen"] = row_dt
 
-        # Ocultar barra de progreso ASN
+            self.root.after(0, lambda: self._finish_cross_asn(asn_hits))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_cross_asn(self, asn_hits: dict):
+        """Finaliza el cruce ASN en el hilo principal."""
         self._asn_progress_var.set(100)
         self._asn_progress_bar.pack_forget()
-
-        # Guardar resultados para detalle de IPs
         self._asn_cross_results = asn_hits
-
-        # Renderizar tabla + gráfico con filtros actuales
         self._render_asn_results()
 
     def _get_asn_rep_filter_set(self) -> set[str]:
@@ -4670,7 +4755,7 @@ class MasterOfParserGUI:
             colors.append(rep_colors.get(rep, "#999999"))
 
         y_pos = list(range(len(labels)))
-        ax.barh(
+        bars_src = ax.barh(
             y_pos,
             values_src,
             color=colors,
@@ -4679,7 +4764,7 @@ class MasterOfParserGUI:
             height=0.4,
             align="edge",
         )
-        ax.barh(
+        bars_dst = ax.barh(
             [y - 0.4 for y in y_pos],
             values_dst,
             color=colors,
@@ -4688,6 +4773,8 @@ class MasterOfParserGUI:
             height=0.4,
             align="edge",
         )
+        ax.bar_label(bars_src, fmt="%g", fontsize=6, padding=2)
+        ax.bar_label(bars_dst, fmt="%g", fontsize=6, padding=2)
         ax.set_yticks(y_pos)
         ax.set_yticklabels(labels, fontsize=7)
         ax.invert_yaxis()
@@ -4929,6 +5016,21 @@ class MasterOfParserGUI:
         pair_tree.column("ultima_vez", width=130)
         pair_tree.column("source_network", width=160)
         pair_tree.pack(side="left", fill="both", expand=True)
+
+        # Hacer columnas ordenables al hacer click en el header
+        def _sort_pair_col(col, reverse=False):
+            data = [(pair_tree.set(iid, col), iid) for iid in pair_tree.get_children()]
+            # Intentar ordenar numéricamente (hits)
+            try:
+                data.sort(key=lambda x: int(x[0].replace(",", "")), reverse=reverse)
+            except ValueError:
+                data.sort(key=lambda x: x[0].lower(), reverse=reverse)
+            for i, (_, iid) in enumerate(data):
+                pair_tree.move(iid, "", i)
+            pair_tree.heading(col, command=lambda: _sort_pair_col(col, not reverse))
+
+        for col_id in _pair_cols:
+            pair_tree.heading(col_id, command=lambda c=col_id: _sort_pair_col(c, False))
 
         pair_sb = ttk.Scrollbar(pairs_frame, orient="vertical", command=pair_tree.yview)
         pair_tree.configure(yscrollcommand=pair_sb.set)
@@ -5185,18 +5287,35 @@ class MasterOfParserGUI:
 
         # "(todas)" → búsqueda global en todas las columnas
         if field_name == "(todas)":
+            row_text = " | ".join(str(v) for v in row).lower()
+            # Detectar OR
+            or_parts = re.split(r"\s+OR\s+", raw_value, flags=re.IGNORECASE)
+            if len(or_parts) > 1:
+                for part in or_parts:
+                    and_parts = re.split(
+                        r"\s+AND\s+", part.strip(), flags=re.IGNORECASE
+                    )
+                    if all(
+                        self._check_single_condition(c.strip(), row_text)
+                        for c in and_parts
+                    ):
+                        return True
+                return False
+            # Detectar AND
+            and_parts = re.split(r"\s+AND\s+", raw_value, flags=re.IGNORECASE)
+            if len(and_parts) > 1:
+                return all(
+                    self._check_single_condition(c.strip(), row_text)
+                    for c in and_parts
+                )
+            # Condición simple — = para match exacto por celda
             if raw_value.startswith("="):
                 cmp_val = raw_value[1:].strip()
                 return any(
                     self._check_single_condition(f"={cmp_val}", str(v).strip().lower())
                     for v in row
                 )
-            elif raw_value.startswith("!"):
-                row_text = " | ".join(str(v) for v in row).lower()
-                return self._check_single_condition(raw_value, row_text)
-            else:
-                row_text = " | ".join(str(v) for v in row).lower()
-                return self._check_single_condition(raw_value, row_text)
+            return self._check_single_condition(raw_value, row_text)
 
         cell_value = self._get_row_value(row, field_name).lower()
 
@@ -6863,12 +6982,89 @@ class MasterOfParserGUI:
             if hasattr(self, "_hist_zoom_back_btn"):
                 self._hist_zoom_back_btn.configure(state="disabled")
 
+            # Guardar datos para highlight de series
+            self._hist_chart_data = {
+                "series_names": series_names,
+                "series_matrix": series_matrix,
+                "labels": labels,
+                "colors": colors,
+                "metric": metric,
+                "title": title,
+                "subtitle": subtitle if subtitle else "",
+            }
+
         self._hist_status_var.set(
             f"Histograma: {parsed_rows:,} filas válidas · {len(ordered_buckets)} intervalos · {len(series_names)} series"
         )
         self._hist_generate_btn.configure(state="normal")
         self._finish_global_progress("Histograma listo (100%).")
         self._nb.select(self._tab_histograms)
+
+    def _on_hist_series_select(self, _event=None):
+        """Redibuja histograma destacando las series seleccionadas en el tree."""
+        data = getattr(self, "_hist_chart_data", None)
+        if not data or self._hist_canvas_mpl is None:
+            return
+        selected_iids = self._hist_tree.selection()
+        if not selected_iids:
+            return
+        highlighted = set()
+        for iid in selected_iids:
+            vals = self._hist_tree.item(iid, "values")
+            if vals:
+                highlighted.add(str(vals[0]))
+        if len(highlighted) == len(data["series_names"]):
+            highlighted = set()  # all selected = no highlight
+
+        series_names = data["series_names"]
+        series_matrix = data["series_matrix"]
+        labels = data["labels"]
+        all_colors = data["colors"]
+        metric = data["metric"]
+        title = data["title"]
+        subtitle = data["subtitle"]
+
+        self._hist_fig.clear()
+        ax = self._hist_fig.add_subplot(111)
+        x_pos = list(range(len(labels)))
+        pretty_labels = [_truncate_label(label, 22) for label in labels]
+
+        bottoms = [0.0] * len(labels)
+        for idx, name in enumerate(series_names):
+            values = series_matrix[name]
+            is_hl = (not highlighted) or (name in highlighted)
+            c = all_colors[idx] if is_hl else "#d0d0d0"
+            a = 0.9 if is_hl else 0.3
+            ax.bar(
+                x_pos, values, bottom=bottoms, color=c, alpha=a,
+                width=0.82, label=name if is_hl else None,
+            )
+            bottoms = [bottoms[i] + values[i] for i in range(len(values))]
+        if highlighted:
+            from matplotlib.patches import Patch
+            legend_els = [
+                Patch(facecolor=all_colors[i], label=n)
+                for i, n in enumerate(series_names) if n in highlighted
+            ]
+            leg = ax.legend(handles=legend_els, fontsize=7, ncol=2, loc="upper left")
+            leg.set_draggable(True)
+        elif len(series_names) > 1:
+            leg = ax.legend(fontsize=7, ncol=2, loc="upper left")
+            leg.set_draggable(True)
+
+        self._style_axis(ax, value_axis="y")
+        step = max(1, len(labels) // 18)
+        ax.set_xticks(x_pos[::step])
+        ax.set_xticklabels(
+            pretty_labels[::step], rotation=38, ha="right", fontsize=8
+        )
+        ax.set_ylabel(metric, fontsize=9)
+        if subtitle:
+            ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
+        else:
+            ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._hist_fig.tight_layout()
+        self._hist_canvas_mpl.draw()
 
     def _zoom_axis(self, ax, x: float, y: float, zoom_factor: float = 0.5):
         x0, x1 = ax.get_xlim()
@@ -7042,22 +7238,35 @@ class MasterOfParserGUI:
             label="📋  Copiar toda la tabla",
             command=lambda: self._copy_tree_to_clipboard(tree),
         )
-        # Copiar celda seleccionada
+        # Copiar celda y fila seleccionada
         col_id = tree.identify_column(event.x)
         row_id = tree.identify_row(event.y)
-        if row_id and col_id:
-            try:
-                col_idx = int(col_id.lstrip("#")) - 1
-                cell_value = str(tree.item(row_id, "values")[col_idx])
+        if row_id:
+            row_vals = tree.item(row_id, "values")
+            if row_vals:
+                # Copiar fila
+                row_text = "\t".join(str(v) for v in row_vals)
                 m.add_command(
-                    label=f'📋  Copiar celda: "{cell_value[:40]}"',
-                    command=lambda v=cell_value: (
+                    label="📋  Copiar fila",
+                    command=lambda t=row_text: (
                         self.root.clipboard_clear(),
-                        self.root.clipboard_append(v),
+                        self.root.clipboard_append(t),
                     ),
                 )
-            except (ValueError, IndexError):
-                pass
+                # Copiar celda
+                if col_id:
+                    try:
+                        col_idx = int(col_id.lstrip("#")) - 1
+                        cell_value = str(row_vals[col_idx])
+                        m.add_command(
+                            label=f'📋  Copiar celda: "{cell_value[:40]}"',
+                            command=lambda v=cell_value: (
+                                self.root.clipboard_clear(),
+                                self.root.clipboard_append(v),
+                            ),
+                        )
+                    except (ValueError, IndexError):
+                        pass
         m.tk_popup(event.x_root, event.y_root)
 
     def _analysis_zoom_back(self):
