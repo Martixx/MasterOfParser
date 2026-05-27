@@ -53,7 +53,7 @@ try:
 
     matplotlib.use("TkAgg")
     from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
     _HAS_MPL = True
 except ImportError:
@@ -211,6 +211,68 @@ FORTINET_TO_CIM = {
 }
 
 # Columnas CIM de salida (orden para Excel)
+IPAPI_FIELDS = [
+    "country",
+    "region",
+    "city",
+    "isp",
+    "org",
+    "as",
+    "asname",
+    "mobile",
+    "proxy",
+    "hosting",
+    "score",
+    "risk_level",
+    "reasons",
+]
+
+IPAPI_SRC_COLUMNS = [f"ipapi_src_{field}" for field in IPAPI_FIELDS]
+IPAPI_DST_COLUMNS = [f"ipapi_dst_{field}" for field in IPAPI_FIELDS]
+
+_COLUMN_NAME_ALIASES = {
+    "ipapi_src_level": "ipapi_src_risk_level",
+    "ipapi_dst_level": "ipapi_dst_risk_level",
+    "ipapi_src_risk_level": "ipapi_src_level",
+    "ipapi_dst_risk_level": "ipapi_dst_level",
+    "qradar_src_ip": "src_ip",
+    "src_ip": "qradar_src_ip",
+    "qradar_dest_ip": "dest_ip",
+    "dest_ip": "qradar_dest_ip",
+    "qradar_src_port": "src_port",
+    "src_port": "qradar_src_port",
+    "qradar_dest_port": "dest_port",
+    "dest_port": "qradar_dest_port",
+    "qradar_dest_country": "dest_country",
+    "dest_country": "qradar_dest_country",
+    "qradar_src_zone": "src_zone",
+    "src_zone": "qradar_src_zone",
+    "qradar_src_asset": "src_host",
+    "src_host": "qradar_src_asset",
+}
+
+
+def _canonical_column_name(name: str) -> str:
+    return {
+        "ipapi_src_level": "ipapi_src_risk_level",
+        "ipapi_dst_level": "ipapi_dst_risk_level",
+    }.get(name, name)
+
+
+def _column_name_candidates(name: str) -> list[str]:
+    candidates = [name]
+    alias = _COLUMN_NAME_ALIASES.get(name)
+    if alias and alias not in candidates:
+        candidates.append(alias)
+    canonical = _canonical_column_name(name)
+    if canonical not in candidates:
+        candidates.append(canonical)
+    alias = _COLUMN_NAME_ALIASES.get(canonical)
+    if alias and alias not in candidates:
+        candidates.append(alias)
+    return candidates
+
+
 CIM_COLUMNS = [
     # ── QRadar (columnas del export TSV) ───────────────────────────────────
     "source_network",
@@ -332,6 +394,8 @@ CIM_COLUMNS = [
     "ioc_src_vt_vendor",
     "ioc_src_osint_hits",
     "ioc_src_osint_sources",
+    "ioc_src_type",
+    "ioc_src_tags",
     "ioc_src_bad",
     # ── IOC enrichment dst ─────────────────────────────────────────────────
     "ioc_dst",
@@ -347,9 +411,212 @@ CIM_COLUMNS = [
     "ioc_dst_vt_vendor",
     "ioc_dst_osint_hits",
     "ioc_dst_osint_sources",
+    "ioc_dst_type",
+    "ioc_dst_tags",
     "ioc_dst_bad",
+    # ── IPAPI enrichment src ───────────────────────────────────────────────
+    *IPAPI_SRC_COLUMNS,
+    # ── IPAPI enrichment dst ───────────────────────────────────────────────
+    *IPAPI_DST_COLUMNS,
     "raw_event",
 ]
+
+_SKIP_OUTPUT_COLUMNS = {
+    "ioc_src_type",
+    "ioc_src_tags",
+    "ioc_dst_type",
+    "ioc_dst_tags",
+    "ioc_src_raw_abuseipdb_country",
+    "ioc_dst_raw_abuseipdb_country",
+    "ioc_src_raw_abuseipdb_is_tor",
+    "ioc_dst_raw_abuseipdb_is_tor",
+    "ioc_src_raw_abuseipdb_isp",
+    "ioc_dst_raw_abuseipdb_isp",
+    "ioc_src_raw_abuseipdb_last_report",
+    "ioc_dst_raw_abuseipdb_last_report",
+    "ioc_src_raw_abuseipdb_reports",
+    "ioc_dst_raw_abuseipdb_reports",
+    "ioc_src_raw_abuseipdb_score",
+    "ioc_dst_raw_abuseipdb_score",
+    "ioc_src_raw_abuseipdb_status",
+    "ioc_dst_raw_abuseipdb_status",
+    "ioc_src_raw_abuseipdb_usage",
+    "ioc_dst_raw_abuseipdb_usage",
+    "ioc_src_raw_asn_drop",
+    "ioc_dst_raw_asn_drop",
+    "ioc_src_raw_asn_drop_source",
+    "ioc_dst_raw_asn_drop_source",
+    "ioc_src_raw_bl_blocklistde_48h",
+    "ioc_dst_raw_bl_blocklistde_48h",
+    "ioc_src_raw_bl_cinsscore",
+    "ioc_dst_raw_bl_cinsscore",
+    "ioc_src_raw_bl_dshield_24",
+    "ioc_dst_raw_bl_dshield_24",
+    "ioc_src_raw_bl_dshield_targets",
+    "ioc_dst_raw_bl_dshield_targets",
+    "ioc_src_raw_bl_et_compromised",
+    "ioc_dst_raw_bl_et_compromised",
+    "ioc_src_raw_bl_feodo",
+    "ioc_dst_raw_bl_feodo",
+    "ioc_src_raw_canon_confidence",
+    "ioc_dst_raw_canon_confidence",
+    "ioc_src_raw_canon_decision_trace",
+    "ioc_dst_raw_canon_decision_trace",
+    "ioc_src_raw_canon_indicator_type",
+    "ioc_dst_raw_canon_indicator_type",
+    "ioc_src_raw_canon_is_vpn_confirmed",
+    "ioc_dst_raw_canon_is_vpn_confirmed",
+    "ioc_src_raw_canon_threat_type_primary",
+    "ioc_dst_raw_canon_threat_type_primary",
+    "ioc_src_raw_canon_threat_type_tags",
+    "ioc_dst_raw_canon_threat_type_tags",
+    "ioc_src_raw_canon_verdict",
+    "ioc_dst_raw_canon_verdict",
+    "ioc_src_raw_canon_vpn_hint_owner",
+    "ioc_dst_raw_canon_vpn_hint_owner",
+    "ioc_src_raw_osint_asn",
+    "ioc_dst_raw_osint_asn",
+    "ioc_src_raw_osint_asn_full",
+    "ioc_dst_raw_osint_asn_full",
+    "ioc_src_raw_osint_c2_reason",
+    "ioc_dst_raw_osint_c2_reason",
+    "ioc_src_raw_osint_c2_suspect",
+    "ioc_dst_raw_osint_c2_suspect",
+    "ioc_src_raw_osint_canon_confidence",
+    "ioc_dst_raw_osint_canon_confidence",
+    "ioc_src_raw_osint_canon_decision_trace",
+    "ioc_dst_raw_osint_canon_decision_trace",
+    "ioc_src_raw_osint_canon_indicator_type",
+    "ioc_dst_raw_osint_canon_indicator_type",
+    "ioc_src_raw_osint_canon_is_vpn_confirmed",
+    "ioc_dst_raw_osint_canon_is_vpn_confirmed",
+    "ioc_src_raw_osint_canon_threat_type_primary",
+    "ioc_dst_raw_osint_canon_threat_type_primary",
+    "ioc_src_raw_osint_canon_threat_type_tags",
+    "ioc_dst_raw_osint_canon_threat_type_tags",
+    "ioc_src_raw_osint_canon_verdict",
+    "ioc_dst_raw_osint_canon_verdict",
+    "ioc_src_raw_osint_canon_vpn_hint_owner",
+    "ioc_dst_raw_osint_canon_vpn_hint_owner",
+    "ioc_src_raw_osint_cdir",
+    "ioc_dst_raw_osint_cdir",
+    "ioc_src_raw_osint_cluster_flag",
+    "ioc_dst_raw_osint_cluster_flag",
+    "ioc_src_raw_osint_cluster_reason",
+    "ioc_dst_raw_osint_cluster_reason",
+    "ioc_src_raw_osint_country",
+    "ioc_dst_raw_osint_country",
+    "ioc_src_raw_osint_gui",
+    "ioc_dst_raw_osint_gui",
+    "ioc_src_raw_osint_harmless",
+    "ioc_dst_raw_osint_harmless",
+    "ioc_src_raw_osint_heuristic_tags",
+    "ioc_dst_raw_osint_heuristic_tags",
+    "ioc_src_raw_osint_is_vpn",
+    "ioc_dst_raw_osint_is_vpn",
+    "ioc_src_raw_osint_link",
+    "ioc_dst_raw_osint_link",
+    "ioc_src_raw_osint_malicious",
+    "ioc_dst_raw_osint_malicious",
+    "ioc_src_raw_osint_owner",
+    "ioc_dst_raw_osint_owner",
+    "ioc_src_raw_osint_reputation",
+    "ioc_dst_raw_osint_reputation",
+    "ioc_src_raw_osint_risk_score",
+    "ioc_dst_raw_osint_risk_score",
+    "ioc_src_raw_osint_suspicious",
+    "ioc_dst_raw_osint_suspicious",
+    "ioc_src_raw_osint_tor_exit",
+    "ioc_dst_raw_osint_tor_exit",
+    "ioc_src_raw_osint_tor_fingerprint",
+    "ioc_dst_raw_osint_tor_fingerprint",
+    "ioc_src_raw_osint_tor_nickname",
+    "ioc_dst_raw_osint_tor_nickname",
+    "ioc_src_raw_osint_tor_source",
+    "ioc_dst_raw_osint_tor_source",
+    "ioc_src_raw_osint_undetected",
+    "ioc_dst_raw_osint_undetected",
+    "ioc_src_raw_osint_vendors_malicious",
+    "ioc_dst_raw_osint_vendors_malicious",
+    "ioc_src_raw_osint_vpn_source",
+    "ioc_dst_raw_osint_vpn_source",
+    "ioc_src_raw_osint_vpn_suspect",
+    "ioc_dst_raw_osint_vpn_suspect",
+    "ioc_src_raw_osint_vt_categories",
+    "ioc_dst_raw_osint_vt_categories",
+    "ioc_src_raw_osint_vt_crowdsourced_tags",
+    "ioc_dst_raw_osint_vt_crowdsourced_tags",
+    "ioc_src_raw_osint_vt_ip_tags",
+    "ioc_dst_raw_osint_vt_ip_tags",
+    "ioc_src_raw_osint_vt_labels",
+    "ioc_dst_raw_osint_vt_labels",
+    "ioc_src_raw_osint_vt_vpn",
+    "ioc_dst_raw_osint_vt_vpn",
+    "ioc_src_raw_osint_whois",
+    "ioc_dst_raw_osint_whois",
+    "ioc_src_raw_otx_asn",
+    "ioc_dst_raw_otx_asn",
+    "ioc_src_raw_otx_country",
+    "ioc_dst_raw_otx_country",
+    "ioc_src_raw_otx_pulses",
+    "ioc_dst_raw_otx_pulses",
+    "ioc_src_raw_otx_reputation",
+    "ioc_dst_raw_otx_reputation",
+    "ioc_src_raw_otx_status",
+    "ioc_dst_raw_otx_status",
+    "ioc_src_raw_threatfox_confidence",
+    "ioc_dst_raw_threatfox_confidence",
+    "ioc_src_raw_threatfox_first_seen",
+    "ioc_dst_raw_threatfox_first_seen",
+    "ioc_src_raw_threatfox_malware",
+    "ioc_dst_raw_threatfox_malware",
+    "ioc_src_raw_threatfox_status",
+    "ioc_dst_raw_threatfox_status",
+    "ioc_src_raw_threatfox_tags",
+    "ioc_dst_raw_threatfox_tags",
+    "ioc_src_raw_threatfox_threat_type",
+    "ioc_dst_raw_threatfox_threat_type",
+    "ioc_src_raw_urlhaus_firstseen",
+    "ioc_dst_raw_urlhaus_firstseen",
+    "ioc_src_raw_urlhaus_spamhaus_dbl",
+    "ioc_dst_raw_urlhaus_spamhaus_dbl",
+    "ioc_src_raw_urlhaus_status",
+    "ioc_dst_raw_urlhaus_status",
+    "ioc_src_raw_urlhaus_surbl",
+    "ioc_dst_raw_urlhaus_surbl",
+    "ioc_src_raw_urlhaus_url_count",
+    "ioc_dst_raw_urlhaus_url_count",
+    "ioc_src_raw_verdict",
+    "ioc_dst_raw_verdict",
+}
+
+_REFERENCE_OUTPUT_FILENAME = "20260430-1851_CIM_PARSED.csv"
+
+
+def _load_reference_output_columns() -> list[str] | None:
+    reference_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), _REFERENCE_OUTPUT_FILENAME
+    )
+    if not os.path.isfile(reference_path):
+        return None
+    try:
+        with open(reference_path, encoding="utf-8-sig", errors="replace") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        return None
+    cols = [_canonical_column_name(col.strip()) for col in first_line.split(",") if col.strip()]
+    if not cols:
+        return None
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for col in cols:
+        if col not in seen:
+            seen.add(col)
+            deduped.append(col)
+    return deduped
+
+
+_REFERENCE_OUTPUT_COLUMNS = _load_reference_output_columns()
 
 
 def _get_output_columns(
@@ -358,7 +625,7 @@ def _get_output_columns(
     include_vt: bool = True,
     include_osint: bool = True,
 ) -> list[str]:
-    cols = list(CIM_COLUMNS)
+    cols = [_canonical_column_name(col) for col in CIM_COLUMNS]
 
     if not include_vt:
         vt_ioc_cols = {
@@ -400,11 +667,26 @@ def _get_output_columns(
 
     if extra_columns:
         for col in extra_columns:
+            col = _canonical_column_name(col)
             if col not in cols:
                 if "raw_event" in cols:
                     cols.insert(cols.index("raw_event"), col)
                 else:
                     cols.append(col)
+    cols = [col for col in cols if col not in _SKIP_OUTPUT_COLUMNS]
+    if _REFERENCE_OUTPUT_COLUMNS:
+        ref_cols = list(_REFERENCE_OUTPUT_COLUMNS)
+        for col in cols:
+            if col not in ref_cols:
+                if "raw_event" in ref_cols:
+                    ref_cols.insert(ref_cols.index("raw_event"), col)
+                else:
+                    ref_cols.append(col)
+        if include_raw_event:
+            if "raw_event" in cols and "raw_event" not in ref_cols:
+                ref_cols.append("raw_event")
+            return ref_cols
+        return [col for col in ref_cols if col != "raw_event"]
     if include_raw_event:
         return cols
     return [col for col in cols if col != "raw_event"]
@@ -638,6 +920,7 @@ def parse_line(line: str) -> dict | None:
 # Detección formato QRadar TSV
 # ─────────────────────────────────────────────────────────────────────────────
 _QRADAR_HEADER_MAP = {
+    # ── Nombres en español (export QRadar ES) ─────────────────────────────
     "Hora inicio": None,  # timestamp se extrae del payload (más preciso)
     "Nombre suceso": "qradar_event_name",
     "Origen de registro": "qradar_log_source",
@@ -651,23 +934,56 @@ _QRADAR_HEADER_MAP = {
     "Source zone": "qradar_src_zone",
     "Nombre activo Origen": "qradar_src_asset",
     "Grupo de red de origen": "qradar_src_network_group",
+    # ── Variantes en inglés / nombres ya traducidos ────────────────────────
+    "qrdara_date": None,         # typo habitual en exports QRadar
+    "qradar_date": None,
+    "qradar_event": "qradar_event_name",
+    "qradar_logsource": "qradar_log_source",
+    "qradar_log_source": "qradar_log_source",
+    "qradar_src_ip": "qradar_src_ip",
+    "qradar_src_port": "qradar_src_port",
+    "qradar_dest_ip": "qradar_dest_ip",
+    "qradar_dest_port": "qradar_dest_port",
+    "qradar_dest_country": "qradar_dest_country",
+    "qradar_src_zone": "qradar_src_zone",
+    "qradar_src_asset": "qradar_src_asset",
+    "qradar_src_network_group": "qradar_src_network_group",
+    "qradar_category": "qradar_category",
+    "source_network": "source_network",
 }
 _QRADAR_PAYLOAD_COL = "Payload"
 
 
 def detect_qradar_tsv(path: str) -> tuple[list[str], str] | None:
-    """Lee la primera línea del fichero. Si contiene 'Payload' como cabecera,
+    """Lee la primera línea del fichero. Si contiene 'Payload'/'payload' como cabecera,
     devuelve (lista de cabeceras, delimitador). Si no, devuelve None (raw syslog).
     Prueba primero coma, luego tab (coma genera más columnas en exports QRadar)."""
-    with open(path, encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
         first_line = f.readline()
     best = None
     for delim in (",", "\t"):
         cols = first_line.strip().split(delim)
-        if _QRADAR_PAYLOAD_COL in cols and len(cols) >= 5:
+        if any(c.strip().lower() == "payload" for c in cols) and len(cols) >= 5:
             if best is None or len(cols) > len(best[0]):
                 best = (cols, delim)
     return best
+
+
+# Marcadores que indican que el CSV ya viene con campos CIM (sin columna Payload)
+_CIM_CSV_MARKERS = {"src_ip", "dest_ip", "qradar_src_ip", "qradar_dest_ip"}
+
+
+def detect_cim_csv(path: str) -> tuple[list[str], str] | None:
+    """Detecta si el fichero es un CSV ya pre-parseado con cabeceras CIM.
+    Devuelve (lista_cabeceras, delimitador) o None si no lo parece."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        first_line = f.readline()
+    for delim in (",", "\t", ";"):
+        cols = [c.strip().lower() for c in first_line.strip().split(delim)]
+        if len(cols) >= 3 and _CIM_CSV_MARKERS.intersection(cols):
+            # devolvemos cabeceras en minúsculas para match directo con CIM
+            return (cols, delim)
+    return None
 
 
 def _split_qradar_line(line: str, ncols: int, delim: str) -> list[str]:
@@ -678,14 +994,22 @@ def _split_qradar_line(line: str, ncols: int, delim: str) -> list[str]:
 
 
 def _extract_qradar_fields(tsv_cols: list[str], parts: list[str]) -> dict:
-    """Dado un split de una línea QRadar, devuelve dict con campos mapeados."""
+    """Dado un split de una línea QRadar, devuelve dict con campos mapeados.
+    Soporta nombres en español, inglés y campos CIM directos (case-insensitive)."""
     extra: dict = {}
+    _cim_set = set(CIM_COLUMNS)
     for i, col_name in enumerate(tsv_cols):
         if i >= len(parts):
             break
-        cim_name = _QRADAR_HEADER_MAP.get(col_name)
+        col_stripped = col_name.strip()
+        col_lower = col_stripped.lower()
+        # Buscar en el mapa: primero exact, luego lowercase
+        cim_name = _QRADAR_HEADER_MAP.get(col_stripped) or _QRADAR_HEADER_MAP.get(col_lower)
         if cim_name:
             extra[cim_name] = parts[i].strip()
+        elif col_lower in _cim_set:
+            # El nombre de columna ya es un campo CIM válido → passthrough directo
+            extra[col_lower] = parts[i].strip()
     return extra
 
 
@@ -762,7 +1086,7 @@ def load_osint_csv(path: str) -> dict:
 
 
 def detect_ioc_csv_kind(path: str) -> str:
-    """Detecta si un CSV es VT ULTRA, ULTRA_OSINT o desconocido por cabeceras."""
+    """Detecta si un CSV es VT ULTRA, ULTRA_OSINT, DOMAINS, FILES o desconocido."""
     try:
         headers, _ = _read_csv_dict_rows(path)
     except OSError:
@@ -778,9 +1102,18 @@ def detect_ioc_csv_kind(path: str) -> str:
         "urlhaus_url_count",
         "otx_pulses",
     }
+    domains_markers = {"domain", "vt_verdict", "vt_malicious_flag"}
+    files_markers = {"file_verdict", "file_malicious_flag", "file_id", "relationship"}
+
     has_vt = bool(headers & vt_markers)
     has_osint = bool(headers & osint_markers)
+    has_domains = domains_markers.issubset(headers)
+    has_files = files_markers.issubset(headers)
 
+    if has_files:
+        return "files"
+    if has_domains:
+        return "domains"
     if has_vt and not has_osint:
         return "vt"
     if has_osint and not has_vt:
@@ -790,10 +1123,135 @@ def detect_ioc_csv_kind(path: str) -> str:
     return "unknown"
 
 
+def load_domains_csv(path: str) -> dict:
+    """Carga un CSV *_DOMAINS.csv de IOCsOfSpades en un dict {ip -> row}.
+    Si una IP tiene varios dominios los junta (comma-sep) y toma el peor veredicto."""
+    _, rows = _read_csv_dict_rows(path)
+    # Acumular por IP
+    by_ip: dict = {}
+    for row in rows:
+        ip = str(row.get("ip", "") or "").strip()
+        if not ip:
+            continue
+        if ip not in by_ip:
+            by_ip[ip] = {
+                "ip": ip,
+                "domains": [],
+                "vt_malicious": 0,
+                "vt_suspicious": 0,
+                "vt_verdict": "clean",
+                "vt_categories": "",
+                "vt_domain_tags": "",
+            }
+            by_ip[ip]["_domain_rows"] = []
+        by_ip[ip]["_domain_rows"].append(row)
+
+    result: dict = {}
+    _verdict_rank = {"malicious": 3, "suspicious": 2, "clean": 1, "": 0}
+    for ip, acc in by_ip.items():
+        domains = []
+        worst_verdict = ""
+        worst_rank = 0
+        total_malicious = 0
+        total_suspicious = 0
+        cats: list = []
+        tags: list = []
+        for r in acc["_domain_rows"]:
+            d = str(r.get("domain", "") or "").strip()
+            if d:
+                domains.append(d)
+            v = str(r.get("vt_verdict", "") or "").strip().lower()
+            rank = _verdict_rank.get(v, 0)
+            if rank > worst_rank:
+                worst_rank = rank
+                worst_verdict = v
+            total_malicious += _to_int(r.get("vt_malicious"))
+            total_suspicious += _to_int(r.get("vt_suspicious"))
+            c = str(r.get("vt_categories", "") or "").strip()
+            if c:
+                cats.append(c)
+            t = str(r.get("vt_domain_tags", "") or "").strip()
+            if t:
+                tags.append(t)
+        row_out = {
+            "ip": ip,
+            "ioc_source_type": "domains",
+            "domains": ",".join(dict.fromkeys(domains)),  # únicos, orden conservado
+            "vt_verdict": worst_verdict,
+            "malicious": str(total_malicious),
+            "suspicious": str(total_suspicious),
+            "vt_categories": ",".join(dict.fromkeys(cats)),
+            "vt_domain_tags": ",".join(dict.fromkeys(tags)),
+        }
+        result[ip] = row_out
+    return result
+
+
+def load_files_csv(path: str, domains_map: dict | None = None) -> dict:
+    """Carga un CSV *_DOMAINS_FILES.csv en un dict {ip -> row}.
+    domains_map: {ip: row} de load_domains_csv para resolver domain→ip.
+    Si no se pasa, intenta leer el *_DOMAINS.csv con el mismo prefijo de fecha."""
+    _, rows = _read_csv_dict_rows(path)
+
+    # Construir domain→ip desde domains_map
+    domain_to_ip: dict = {}
+    if domains_map:
+        for ip, dr in domains_map.items():
+            for d in str(dr.get("domains", "") or "").split(","):
+                d = d.strip()
+                if d:
+                    domain_to_ip[d] = ip
+    else:
+        # Intenta leer el DOMAINS.csv paralelo
+        import glob as _glob
+        import os as _os
+        base = _os.path.splitext(path)[0].replace("_DOMAINS_FILES", "_DOMAINS")
+        cands = [base + ".csv"] + sorted(_glob.glob("*_DOMAINS.csv"))
+        for c in cands:
+            if _os.path.exists(c):
+                try:
+                    dm = load_domains_csv(c)
+                    for ip, dr in dm.items():
+                        for d in str(dr.get("domains", "") or "").split(","):
+                            d = d.strip()
+                            if d:
+                                domain_to_ip[d] = ip
+                    break
+                except OSError:
+                    pass
+
+    # Acumular por IP: tomar peor file_verdict
+    _verdict_rank = {"malicious": 3, "suspicious": 2, "clean": 1, "": 0}
+    by_ip: dict = {}
+    for row in rows:
+        domain = str(row.get("domain", "") or "").strip()
+        ip = domain_to_ip.get(domain, "")
+        if not ip:
+            continue
+        v = str(row.get("file_verdict", "") or "").strip().lower()
+        rank = _verdict_rank.get(v, 0)
+        existing = by_ip.get(ip)
+        if existing is None or rank > _verdict_rank.get(existing.get("vt_verdict", ""), 0):
+            by_ip[ip] = {
+                "ip": ip,
+                "ioc_source_type": "files",
+                "domains": domain,
+                "file_verdict": v,
+                "vt_verdict": v,   # alias para que _is_ioc_alert lo lea
+                "malicious": row.get("file_malicious", "0"),
+                "suspicious": row.get("file_suspicious", "0"),
+                "file_id": row.get("file_id", ""),
+                "file_name": row.get("file_name", ""),
+                "file_gui": row.get("file_gui", ""),
+                "relationship": row.get("relationship", ""),
+            }
+    return by_ip
+
+
 def load_ioc_sources(
     ioc_csv: str | None, osint_csv: str | None
 ) -> tuple[dict, dict, list[str]]:
-    """Carga y clasifica fuentes IOC (VT/OSINT) tolerando rutas cruzadas."""
+    """Carga y clasifica fuentes IOC (VT/OSINT/DOMAINS/FILES) tolerando rutas cruzadas."""
     vt_map: dict = {}
     osint_map: dict = {}
     logs: list[str] = []
@@ -818,16 +1276,29 @@ def load_ioc_sources(
                 logs.append(
                     f"[!] {label} CSV sin IPs leíbles. Revisa delimitador/cabecera 'ip' ({path})"
                 )
+        elif kind == "domains":
+            loaded = load_domains_csv(path)
+            vt_map.update(loaded)
+            logs.append(f"[+] {label} CSV (DOMAINS):    {len(loaded):,} IPs  ({path})")
+        elif kind == "files":
+            # Pasa el vt_map ya cargado para resolver domain→ip
+            loaded = load_files_csv(path, domains_map=vt_map if vt_map else None)
+            vt_map.update(loaded)
+            logs.append(f"[+] {label} CSV (FILES):      {len(loaded):,} IPs  ({path})")
         elif kind == "mixed":
             vt_loaded = load_iocs_csv(path)
             osint_loaded = load_osint_csv(path)
-            vt_map.update(vt_loaded)
+            if label == "OSINT":
+                for ip, row in vt_loaded.items():
+                    vt_map.setdefault(ip, row)
+            else:
+                vt_map.update(vt_loaded)
             osint_map.update(osint_loaded)
             logs.append(
                 f"[+] {label} CSV (mixto): VT={len(vt_loaded):,} / OSINT={len(osint_loaded):,} IPs  ({path})"
             )
         else:
-            # Fallback conservador: intentar ambas lecturas para no perder enriquecimiento.
+            # Fallback conservador
             vt_loaded = load_iocs_csv(path)
             osint_loaded = load_osint_csv(path)
             if len(vt_loaded) >= len(osint_loaded):
@@ -881,8 +1352,67 @@ _IOC_SUFFIX = [
     "_vt_vendor",
     "_osint_hits",
     "_osint_sources",
+    "_type",
+    "_tags",
     "_bad",
 ]
+
+_IOC_TYPE_PRIORITY = [
+    "phishing",
+    "malware",
+    "c2",
+    "botnet",
+    "scanner",
+    "adware",
+    "proxy",
+    "spam",
+]
+
+_IOC_TYPE_PATTERNS = {
+    "phishing": [
+        "phish",
+        "credential",
+        "cred theft",
+        "brand abuse",
+        "impersonation",
+        "login page",
+    ],
+    "malware": [
+        "malware",
+        "trojan",
+        "stealer",
+        "infostealer",
+        "ransom",
+        "dropper",
+        "loader",
+        "backdoor",
+        "rat",
+        "worm",
+        "virus",
+        "payload",
+        "malicious",
+    ],
+    "c2": [
+        "c2",
+        "command and control",
+        "command-and-control",
+        "beacon",
+    ],
+    "botnet": ["botnet", "ddos", "drone"],
+    "scanner": [
+        "scanner",
+        "scan",
+        "bruteforce",
+        "brute force",
+        "masscan",
+        "recon",
+        "exploitation",
+        "exploit",
+    ],
+    "adware": ["adware", "malvert", "advert", "ads"],
+    "proxy": ["proxy", "vpn", "tor", "relay", "anonym"],
+    "spam": ["spam", "spambot", "bulk mail"],
+}
 
 
 def _empty_ioc(prefix: str) -> dict:
@@ -1023,6 +1553,73 @@ def _collect_osint_sources(row: dict) -> list[str]:
     return unique
 
 
+def _collect_ioc_text_hints(row: dict) -> list[str]:
+    values = [
+        row.get("vt_categories", ""),
+        row.get("vt_labels", ""),
+        row.get("vt_crowdsourced_tags", ""),
+        row.get("vt_ip_tags", ""),
+        row.get("heuristic_tags", ""),
+        row.get("cluster_reason", ""),
+        row.get("c2_reason", ""),
+        row.get("vendors_malicious", ""),
+        _osint_get(row, "verdict"),
+        _osint_get(row, "threatfox_malware"),
+        _osint_get(row, "threatfox_threat_type"),
+        _osint_get(row, "threatfox_tags"),
+        _osint_get(row, "abuseipdb_usage"),
+        _osint_get(row, "abuseipdb_isp"),
+    ]
+    hints: list[str] = []
+    for value in values:
+        text = str(value or "").strip().lower()
+        if text and "error:" not in text:
+            hints.append(text)
+    return hints
+
+
+def _classify_ioc_tags(row: dict | None) -> list[str]:
+    if not row:
+        return []
+
+    text_hints = _collect_ioc_text_hints(row)
+    tags: list[str] = []
+
+    for tag, patterns in _IOC_TYPE_PATTERNS.items():
+        if any(pattern in hint for hint in text_hints for pattern in patterns):
+            tags.append(tag)
+
+    if _truthy(row.get("c2_suspect")) and "c2" not in tags:
+        tags.append("c2")
+    if _truthy(row.get("is_vpn")) and "proxy" not in tags:
+        tags.append("proxy")
+    if _truthy(row.get("tor_exit")) and "proxy" not in tags:
+        tags.append("proxy")
+    if _osint_get(row, "abuseipdb_is_tor").lower() == "true" and "proxy" not in tags:
+        tags.append("proxy")
+    if _to_int(_osint_get(row, "urlhaus_url_count")) > 0 and "malware" not in tags:
+        tags.append("malware")
+    if _to_int(_osint_get(row, "threatfox_confidence")) > 0 and "malware" not in tags:
+        tags.append("malware")
+
+    ordered: list[str] = []
+    seen = set()
+    for candidate in _IOC_TYPE_PRIORITY:
+        if candidate in tags and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    for candidate in tags:
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _classify_ioc_primary_type(row: dict | None) -> str:
+    tags = _classify_ioc_tags(row)
+    return tags[0] if tags else ""
+
+
 def _is_ioc_alert(row: dict | None) -> bool:
     if not row:
         return False
@@ -1039,6 +1636,10 @@ def _is_ioc_alert(row: dict | None) -> bool:
     if _truthy(row.get("c2_suspect")):
         return True
     if _to_int(row.get("risk_score")) >= 70:
+        return True
+    # DOMAINS / FILES: vt_verdict o file_verdict
+    _v = str(row.get("vt_verdict") or row.get("file_verdict") or "").strip().lower()
+    if _v in ("malicious", "suspicious"):
         return True
     return False
 
@@ -1098,7 +1699,14 @@ def enrich_ioc(
         result[f"ioc_{prefix}_risk"] = row.get("risk_score", "")
         result[f"ioc_{prefix}_country"] = row.get("country", "")
         result[f"ioc_{prefix}_owner"] = row.get("owner", "")
-        result[f"ioc_{prefix}_asn"] = row.get("asn_full", row.get("asn", ""))
+        result[f"ioc_{prefix}_asn"] = _normalize_asn_value(
+            row.get("asn"),
+            row.get("asn_full"),
+            row.get("osint_asn"),
+            row.get("osint_asn_full"),
+            row.get("otx_asn"),
+            row.get("osint_otx_asn"),
+        )
         result[f"ioc_{prefix}_reputation"] = row.get("reputation", "")
         result[f"ioc_{prefix}_malicious"] = row.get("malicious", "")
         result[f"ioc_{prefix}_vendors"] = row.get("vendors_malicious", "")
@@ -1108,7 +1716,21 @@ def enrich_ioc(
         osint_sources = _collect_osint_sources(row)
         result[f"ioc_{prefix}_osint_sources"] = ",".join(osint_sources)
         result[f"ioc_{prefix}_osint_hits"] = str(len(osint_sources))
+        result[f"ioc_{prefix}_type"] = _classify_ioc_primary_type(row)
+        result[f"ioc_{prefix}_tags"] = ",".join(_classify_ioc_tags(row))
         result[f"ioc_{prefix}_bad"] = _ioc_quality_label(row, in_list)
+        # Campos extra para DOMAINS / FILES
+        ioc_src_type = str(row.get("ioc_source_type", "") or "").strip()
+        if ioc_src_type in ("domains", "files"):
+            result[f"ioc_{prefix}_domains"] = row.get("domains", "")
+            result[f"ioc_{prefix}_vt_verdict"] = row.get("vt_verdict", row.get("file_verdict", ""))
+            result[f"ioc_{prefix}_vt_categories"] = row.get("vt_categories", "")
+            result[f"ioc_{prefix}_vt_domain_tags"] = row.get("vt_domain_tags", "")
+        if ioc_src_type == "files":
+            result[f"ioc_{prefix}_file_verdict"] = row.get("file_verdict", "")
+            result[f"ioc_{prefix}_file_id"] = row.get("file_id", "")
+            result[f"ioc_{prefix}_file_name"] = row.get("file_name", "")
+            result[f"ioc_{prefix}_file_relationship"] = row.get("relationship", "")
         for key in ioc_raw_keys or []:
             result[f"ioc_{prefix}_raw_{key}"] = str(row.get(key, "") or "")
     elif in_list:
@@ -1156,6 +1778,65 @@ def enrich_ioc_candidates(
     return result
 
 
+def load_ipapi_csv(path: str | None) -> dict:
+    data: dict = {}
+    if not path:
+        return data
+
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            normalized_row = {
+                _normalize_csv_key(key): str(value or "").strip()
+                for key, value in (row or {}).items()
+            }
+            ip = normalized_row.get("ip", "")
+            if ip:
+                data[ip] = normalized_row
+    return data
+
+
+def _empty_ipapi(prefix: str) -> dict:
+    return {f"ipapi_{prefix}_{field}": "" for field in IPAPI_FIELDS}
+
+
+def enrich_ipapi(ip: str, ipapi_map: dict, prefix: str) -> dict:
+    result = _empty_ipapi(prefix)
+    if not ip:
+        return result
+
+    row = ipapi_map.get(ip)
+    if not row:
+        return result
+
+    result[f"ipapi_{prefix}_country"] = row.get("country", "")
+    result[f"ipapi_{prefix}_region"] = row.get("region", "")
+    result[f"ipapi_{prefix}_city"] = row.get("city", "")
+    result[f"ipapi_{prefix}_isp"] = row.get("isp", "")
+    result[f"ipapi_{prefix}_org"] = row.get("org", "")
+    result[f"ipapi_{prefix}_as"] = row.get("as", "")
+    result[f"ipapi_{prefix}_asname"] = row.get("asname", "")
+    result[f"ipapi_{prefix}_mobile"] = row.get("mobile", "")
+    result[f"ipapi_{prefix}_proxy"] = row.get("proxy", "")
+    result[f"ipapi_{prefix}_hosting"] = row.get("hosting", "")
+    result[f"ipapi_{prefix}_score"] = row.get("score", "")
+    result[f"ipapi_{prefix}_risk_level"] = row.get("risk_level", row.get("level", ""))
+    result[f"ipapi_{prefix}_reasons"] = row.get("reasons", "")
+    return result
+
+
+def enrich_ipapi_candidates(candidates: list[str], ipapi_map: dict, prefix: str) -> dict:
+    seen: set[str] = set()
+    for value in candidates:
+        ip = str(value or "").strip()
+        if ip and ip not in seen:
+            seen.add(ip)
+            enriched = enrich_ipapi(ip, ipapi_map, prefix)
+            if any(enriched.values()):
+                return enriched
+    return _empty_ipapi(prefix)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Constantes para la pestaña Análisis
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1163,17 +1844,51 @@ _NO_SECONDARY_FIELD = "(ninguno)"
 _NO_FILTER_FIELD = "(sin filtro)"
 _NO_SERIES_FIELD = "(total)"
 _ANALYSIS_VENDOR_OPTIONS = ["(todos)", "Palo Alto Networks", "Fortinet", "Cisco"]
+_IOC_TYPE_QUICK_OPTIONS = [
+    "todos",
+    "phishing",
+    "malware",
+    "c2",
+    "botnet",
+    "scanner",
+    "proxy",
+    "spam",
+    "adware",
+]
+_IPAPI_DST_QUICK_OPTIONS = [
+    "proxy",
+    "hosting",
+    "mobile",
+]
+
+_IPAPI_DST_QUICK_VISIBLE_COLUMNS = [
+    "ipapi_dst_proxy",
+    "ipapi_dst_hosting",
+    "ipapi_dst_mobile",
+    "ipapi_dst_score",
+    "ipapi_dst_risk_level",
+    "ipapi_dst_reasons",
+]
+_IPAPI_PIVOT_FIELDS = [*IPAPI_SRC_COLUMNS, *IPAPI_DST_COLUMNS]
 _PIVOT_FIELDS = [
     "source_network",
     "qradar_event_name",
     "qradar_log_source",
     "qradar_category",
+    "qradar_src_ip",
+    "qradar_src_port",
+    "qradar_dest_ip",
+    "qradar_dest_port",
     "qradar_dest_country",
     "qradar_src_zone",
+    "qradar_src_asset",
     "qradar_src_network_group",
-    "vendor",
     "timestamp",
     "timestamp_date",
+    "dvc",
+    "dvc_serial",
+    "vendor",
+    "subtype",
     "action",
     "event_category",
     "severity",
@@ -1182,6 +1897,7 @@ _PIVOT_FIELDS = [
     "ips_event",
     "action_source",
     "rule",
+    "rule_uuid",
     "session_end_reason",
     "src_ip",
     "src_ip_nat",
@@ -1189,51 +1905,73 @@ _PIVOT_FIELDS = [
     "src_zone",
     "src_host",
     "src_mac",
-    "src_country",
-    "src_os",
+    "inbound_interface",
+    "user",
     "dest_ip",
     "dest_ip_nat",
     "dest_port",
     "dest_zone",
     "dest_host",
     "dest_mac",
-    "dest_country",
+    "outbound_interface",
+    "dest_user",
     "transport",
     "app",
     "url_category",
     "url",
-    "user",
-    "dest_user",
-    "dvc",
-    "dvc_serial",
-    "rule_uuid",
-    "virtual_system",
-    "inbound_interface",
-    "outbound_interface",
+    "bytes_out",
+    "bytes_in",
+    "bytes_total",
+    "packets_out",
+    "packets_in",
+    "packets_total",
+    "duration",
     "session_id",
-    "ioc_src_country",
-    "ioc_dst_country",
-    "ioc_src_risk",
-    "ioc_dst_risk",
-    "ioc_src_owner",
-    "ioc_dst_owner",
-    "ioc_src_reputation",
-    "ioc_dst_reputation",
-    "ioc_src_malicious",
-    "ioc_dst_malicious",
-    "ioc_src_vendors",
-    "ioc_dst_vendors",
-    "ioc_src_source",
-    "ioc_dst_source",
-    "ioc_src_vt_vendor",
-    "ioc_dst_vt_vendor",
-    "ioc_src_osint_hits",
-    "ioc_dst_osint_hits",
-    "ioc_src_osint_sources",
-    "ioc_dst_osint_sources",
-    "ioc_src_bad",
-    "ioc_dst_bad",
+    "repeat_count",
+    "virtual_system",
+    "flags",
+    "sequence",
+    "src_edl",
+    "dest_edl",
+    "src_dag",
+    "dest_dag",
+    "src_country",
+    "dest_country",
+    "src_os",
+    "proto",
+    "zone_src",
+    "zone_dst",
+    "interface_src",
+    "interface_dst",
+    "action_raw",
+    "action_normalized",
+    "rule_name",
+    "category",
+    "is_threat",
+    "is_url_filter",
+    "is_ips",
+    "is_dns",
+    "is_traffic",
+    "dst_region",
+    "is_CN",
+    "is_RU",
+    "dst_cloud_provider",
+    "nat_src",
+    "nat_dst",
+    "bytes_sent",
+    "bytes_received",
+    "packets_sent",
+    "packets_received",
+    "ssl_inspected",
+    "device_type",
+    "event_type",
+    "ioc_src_type",
+    "ioc_src_tags",
+    "ioc_dst_type",
+    "ioc_dst_tags",
+    *_IPAPI_PIVOT_FIELDS,
 ]
+_RESULTS_DEFAULT_COLUMNS = list(_PIVOT_FIELDS)
 _DERIVED_ANALYSIS_FIELDS = [
     "traffic_scope",
     "ioc_scope",
@@ -1675,13 +2413,24 @@ def _detect_spikes(
 # ─────────────────────────────────────────────────────────────────────────────
 # ASN list — carga y cruce
 # ─────────────────────────────────────────────────────────────────────────────
-_ASN_NUM_RE = re.compile(r"\b(\d{3,10})\b")
+_ASN_NUM_RE = re.compile(r"(?i)\bas\s*(\d{1,10})\b|\b(\d{1,10})\b")
 
 
 def _extract_asn_number(asn_str: str) -> str:
     """Extrae el número ASN de cadenas como 'AS 4134', 'AS4134 Chinanet', '4134'."""
     m = _ASN_NUM_RE.search(str(asn_str or "").strip())
-    return m.group(1) if m else ""
+    if not m:
+        return ""
+    return m.group(1) or m.group(2) or ""
+
+
+def _normalize_asn_value(*values) -> str:
+    """Devuelve ASN numérico limpio a partir de varias columnas candidatas."""
+    for value in values:
+        asn_num = _extract_asn_number(value)
+        if asn_num:
+            return asn_num
+    return ""
 
 
 def load_asn_csv(path: str) -> dict[str, dict]:
@@ -1705,21 +2454,31 @@ def load_asn_csv(path: str) -> dict[str, dict]:
                         return i
             return -1
 
-        idx_asn_label = 0  # primera columna siempre tiene "AS XXXX"
+        idx_asn_label = 0  # fallback visual
         idx_country = _idx(["country", "país"])
         idx_name = _idx(["nombre", "name"])
         idx_rep = _idx(["reputaci", "reputation"])
         idx_comments = _idx(["comentario", "comment"])
         idx_source = _idx(["fuente", "source"])
+        asn_candidate_indices = [i for i, col in enumerate(h) if "asn" in col] or [0]
 
         for row in reader:
             if not row or not row[0].strip():
                 continue
-            asn_num = _extract_asn_number(row[0])
+            asn_candidates = [
+                row[i].strip()
+                for i in asn_candidate_indices
+                if i < len(row) and row[i].strip()
+            ]
+            asn_num = _normalize_asn_value(*asn_candidates, row[0])
             if not asn_num:
                 continue
             asn_map[asn_num] = {
-                "asn_label": row[0].strip() if len(row) > 0 else "",
+                "asn_label": (
+                    row[idx_asn_label].strip()
+                    if idx_asn_label < len(row) and row[idx_asn_label].strip()
+                    else f"AS {asn_num}"
+                ),
                 "country": (
                     row[idx_country].strip()
                     if idx_country >= 0 and idx_country < len(row)
@@ -1995,6 +2754,14 @@ class MasterOfParserGUI:
         ttk.Entry(row, textvariable=self._osint_var, width=58).pack(side="left", padx=4)
         ttk.Button(row, text="Examinar…", command=self._pick_osint).pack(side="left")
 
+        # IPAPI CSV
+        row = ttk.Frame(tab)
+        row.pack(fill="x", **pad)
+        ttk.Label(row, text="IPAPI CSV", width=20, anchor="w").pack(side="left")
+        self._ipapi_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self._ipapi_var, width=58).pack(side="left", padx=4)
+        ttk.Button(row, text="Examinar…", command=self._pick_ipapi).pack(side="left")
+
         # Fichero de salida
         row = ttk.Frame(tab)
         row.pack(fill="x", **pad)
@@ -2063,6 +2830,18 @@ class MasterOfParserGUI:
             side="left", padx=4
         )
 
+        row = ttk.Frame(tab)
+        row.pack(fill="x", **pad)
+        ttk.Label(row, text="Relacionar IPAPI", width=20, anchor="w").pack(side="left")
+        self._ipapi_src_var = tk.BooleanVar(value=True)
+        self._ipapi_dst_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="src_ip (origen)", variable=self._ipapi_src_var).pack(
+            side="left", padx=4
+        )
+        ttk.Checkbutton(row, text="dest_ip (destino)", variable=self._ipapi_dst_var).pack(
+            side="left", padx=4
+        )
+
         ttk.Separator(tab, orient="horizontal").pack(fill="x", padx=8, pady=6)
 
         # Botones
@@ -2118,15 +2897,61 @@ class MasterOfParserGUI:
         # ── Fila 1: barra de filtro (ancho completo) ──
         filter_row = ttk.Frame(tab)
         filter_row.pack(fill="x", padx=8, pady=(6, 2))
-        ttk.Label(filter_row, text="Filtrar:").pack(side="left")
+        ttk.Label(filter_row, text="Filtrar  (* ? ! = AND OR):").pack(side="left")
         self._filter_var = tk.StringVar()
         filter_entry = ttk.Entry(filter_row, textvariable=self._filter_var)
         filter_entry.pack(side="left", padx=4, expand=True, fill="x")
         filter_entry.bind("<Return>", lambda _: self._apply_filter())
+        self._results_filter_not_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filter_row, text="NOT", variable=self._results_filter_not_var).pack(
+            side="left", padx=(2, 4)
+        )
         ttk.Button(
             filter_row, text="✕", width=3,
-            command=lambda: self._filter_var.set(""),
+            command=lambda: (self._filter_var.set(""), self._results_filter_not_var.set(False)),
         ).pack(side="left")
+
+        # ── Fila 1b: selección rápida de tipo IOC ──
+        ioc_quick_row = ttk.Frame(tab)
+        ioc_quick_row.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Label(ioc_quick_row, text="IOC tipo:").pack(side="left")
+        self._results_ioc_type_vars: dict[str, tk.BooleanVar] = {}
+        for _ioc_t in _IOC_TYPE_QUICK_OPTIONS[1:]:  # skip "todos"
+            _var = tk.BooleanVar()
+            self._results_ioc_type_vars[_ioc_t] = _var
+            ttk.Checkbutton(
+                ioc_quick_row,
+                text=_ioc_t,
+                variable=_var,
+                command=self._apply_quick_ioc_type_filter,
+            ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            ioc_quick_row,
+            text="✕",
+            width=3,
+            command=self._clear_results_ioc_type_filter,
+        ).pack(side="left", padx=(6, 0))
+
+        # ── Fila 1c: selección rápida IPAPI tipo ──
+        ipapi_quick_row = ttk.Frame(tab)
+        ipapi_quick_row.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Label(ipapi_quick_row, text="IPAPI tipo:").pack(side="left")
+        self._results_ipapi_dst_vars: dict[str, tk.BooleanVar] = {}
+        for _ipapi_opt in _IPAPI_DST_QUICK_OPTIONS:
+            _var = tk.BooleanVar()
+            self._results_ipapi_dst_vars[_ipapi_opt] = _var
+            ttk.Checkbutton(
+                ipapi_quick_row,
+                text=_ipapi_opt,
+                variable=_var,
+                command=self._apply_quick_ipapi_dst_filter,
+            ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            ipapi_quick_row,
+            text="✕",
+            width=3,
+            command=self._clear_results_ipapi_dst_filter,
+        ).pack(side="left", padx=(6, 0))
 
         # ── Fila 2: botones y controles ──
         ctrl = ttk.Frame(tab)
@@ -2142,6 +2967,16 @@ class MasterOfParserGUI:
             width=20,
         )
         self._filter_col_cb.pack(side="left", padx=4)
+        ttk.Label(ctrl, text="Combinar:").pack(side="left", padx=(8, 0))
+        self._results_filter_mode_var = tk.StringVar(value="AND")
+        self._results_filter_mode_cb = ttk.Combobox(
+            ctrl,
+            textvariable=self._results_filter_mode_var,
+            state="readonly",
+            values=("AND", "OR"),
+            width=5,
+        )
+        self._results_filter_mode_cb.pack(side="left", padx=4)
         ttk.Label(ctrl, text="Desde:").pack(side="left", padx=(8, 0))
         self._results_from_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._results_from_var, width=12).pack(
@@ -2221,6 +3056,7 @@ class MasterOfParserGUI:
         self._all_rows: list = []
         self._csv_columns: list = []
         self._df = None  # Cache pandas DataFrame
+        self._chart_font_var = tk.IntVar(value=9)  # tamaño base letra gráficas
         self._display_columns: list = []
         self._hidden_columns: set[str] = set()
         self._header_drag_col: str = ""
@@ -2264,6 +3100,14 @@ class MasterOfParserGUI:
         if p:
             self._osint_var.set(p)
 
+    def _pick_ipapi(self):
+        p = filedialog.askopenfilename(
+            title="Seleccionar IPAPI CSV",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if p:
+            self._ipapi_var.set(p)
+
     def _pick_out(self):
         p = filedialog.asksaveasfilename(
             title="Guardar CSV de salida",
@@ -2300,12 +3144,15 @@ class MasterOfParserGUI:
 
         ioc_csv = self._ioc_var.get().strip() or None
         osint_csv = self._osint_var.get().strip() or None
+        ipapi_csv = self._ipapi_var.get().strip() or None
         output_file = self._out_var.get().strip() or None
         ioc_only = self._ioconly_var.get()
         include_raw_event = self._raw_event_var.get()
         forti_src_zone_mode = self._forti_src_zone_mode_var.get().strip() or "ssid"
         ioc_src = self._ioc_src_var.get()
         ioc_dst = self._ioc_dst_var.get()
+        ipapi_src = self._ipapi_src_var.get()
+        ipapi_dst = self._ipapi_dst_var.get()
         extract_ips = (
             self._extract_path_var.get().strip() if self._extract_var.get() else None
         )
@@ -2315,6 +3162,9 @@ class MasterOfParserGUI:
             return
         if osint_csv and not os.path.isfile(osint_csv):
             messagebox.showerror("Error", f"OSINT CSV no encontrado:\n{osint_csv}")
+            return
+        if ipapi_csv and not os.path.isfile(ipapi_csv):
+            messagebox.showerror("Error", f"IPAPI CSV no encontrado:\n{ipapi_csv}")
             return
 
         self._stop_requested.clear()
@@ -2332,6 +3182,7 @@ class MasterOfParserGUI:
                 log_file,
                 ioc_csv,
                 osint_csv,
+                ipapi_csv,
                 output_file,
                 ioc_only,
                 extract_ips,
@@ -2339,6 +3190,8 @@ class MasterOfParserGUI:
                 forti_src_zone_mode,
                 ioc_src,
                 ioc_dst,
+                ipapi_src,
+                ipapi_dst,
             ),
             daemon=True,
         ).start()
@@ -2354,6 +3207,7 @@ class MasterOfParserGUI:
         log_file,
         ioc_csv,
         osint_csv,
+        ipapi_csv,
         output_file,
         ioc_only,
         extract_ips,
@@ -2361,6 +3215,8 @@ class MasterOfParserGUI:
         forti_src_zone_mode,
         ioc_src,
         ioc_dst,
+        ipapi_src,
+        ipapi_dst,
     ):
         q = self._queue
 
@@ -2385,6 +3241,10 @@ class MasterOfParserGUI:
                 ioc_map = osint_map
                 ioc_set = set(ioc_map.keys())
 
+            ipapi_map: dict = load_ipapi_csv(ipapi_csv)
+            if ipapi_map:
+                log(f"[+] IPAPI CSV:  {len(ipapi_map):,} IPs  ({ipapi_csv})")
+
             ioc_raw_keys = _collect_ioc_row_keys(ioc_map)
             ioc_raw_output_columns = _build_ioc_raw_output_columns(ioc_raw_keys)
             has_vt_source = bool(vt_map)
@@ -2408,17 +3268,26 @@ class MasterOfParserGUI:
                 log("[+] raw_event: activado (salida más pesada)")
             log(f"[+] Forti src_zone: {forti_src_zone_mode}")
             log(f"[+] IOC src_ip: {ioc_src}, dest_ip: {ioc_dst}")
+            log(f"[+] IPAPI src_ip: {ipapi_src}, dest_ip: {ipapi_dst}")
 
-            # Detectar formato QRadar TSV
+            # Detectar formato
             qradar_result = detect_qradar_tsv(log_file)
+            cim_csv_result = detect_cim_csv(log_file) if not qradar_result else None
             qradar_cols = None
             qradar_delim = ","
+            cim_csv_cols = None
+            cim_csv_delim = ","
             if qradar_result:
                 qradar_cols, qradar_delim = qradar_result
                 log(
                     f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)"
                 )
-                payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
+                payload_idx = next(i for i, c in enumerate(qradar_cols) if c.strip().lower() == "payload")
+            elif cim_csv_result:
+                cim_csv_cols, cim_csv_delim = cim_csv_result
+                log(
+                    f"[+] Formato:   CSV columnar pre-parseado ({len(cim_csv_cols)} columnas, delim='{cim_csv_delim}')"
+                )
             else:
                 log("[+] Formato:   raw syslog (una línea = un evento)")
 
@@ -2429,6 +3298,89 @@ class MasterOfParserGUI:
             ioc_hits_by_vendor: Counter = Counter()
             last_pct = -1
             unique_ips: set = set()
+
+            # ── Path especial: CSV columnar (columnas separadas, sin Payload) ────
+            if cim_csv_cols:
+                with (
+                    open(log_file, encoding="utf-8-sig", errors="replace", newline="") as fin,
+                    open(output_file, "w", newline="", encoding="utf-8-sig") as fout,
+                ):
+                    writer = csv.DictWriter(
+                        fout, fieldnames=output_columns, extrasaction="ignore"
+                    )
+                    writer.writeheader()
+                    reader = csv.DictReader(fin, delimiter=cim_csv_delim)
+                    rows_list = list(reader)
+                    total_rows = len(rows_list)
+                    for i, raw_row in enumerate(rows_list, 1):
+                        if self._stop_requested.is_set():
+                            log("[!] Ejecución detenida por usuario.")
+                            q.put(("cancelled", output_file))
+                            return
+                        pct = (i * 100) // max(total_rows, 1)
+                        if pct % 5 == 0 and pct != last_pct:
+                            q.put(("progress", pct))
+                            last_pct = pct
+                        # Normalizar claves a minúsculas sin BOM
+                        record = {_normalize_csv_key(k): str(v or "").strip() for k, v in raw_row.items()}
+                        # Alias: qradar_src_ip / qradar_dest_ip -> src_ip / dest_ip si no vienen
+                        if not record.get("src_ip"):
+                            record["src_ip"] = record.get("qradar_src_ip", "")
+                        if not record.get("dest_ip"):
+                            record["dest_ip"] = record.get("qradar_dest_ip", "")
+                        if not record.get("src_port"):
+                            record["src_port"] = record.get("qradar_src_port", "")
+                        if not record.get("dest_port"):
+                            record["dest_port"] = record.get("qradar_dest_port", "")
+                        if not record.get("vendor"):
+                            record["vendor"] = "QRadar-CSV"
+                        record = unify_cim_record(record, forti_src_zone_mode)
+                        record.update(_empty_ipapi("src"))
+                        record.update(_empty_ipapi("dst"))
+                        src_ip = record.get("src_ip", "")
+                        dest_ip = record.get("dest_ip", "")
+                        if extract_ips:
+                            if src_ip: unique_ips.add(src_ip)
+                            if dest_ip: unique_ips.add(dest_ip)
+                        if ioc_src:
+                            record.update(enrich_ioc_candidates(
+                                [src_ip, record.get("src_ip_nat", "")],
+                                ioc_set, ioc_map, "src", ioc_raw_keys))
+                        if ioc_dst:
+                            record.update(enrich_ioc_candidates(
+                                [dest_ip, record.get("dest_ip_nat", "")],
+                                ioc_set, ioc_map, "dst", ioc_raw_keys))
+                        if ipapi_src:
+                            record.update(
+                                enrich_ipapi_candidates(
+                                    [src_ip, record.get("src_ip_nat", "")],
+                                    ipapi_map,
+                                    "src",
+                                )
+                            )
+                        if ipapi_dst:
+                            record.update(
+                                enrich_ipapi_candidates(
+                                    [dest_ip, record.get("dest_ip_nat", "")],
+                                    ipapi_map,
+                                    "dst",
+                                )
+                            )
+                        src_hit = record.get("ioc_src") == "YES" if ioc_src else False
+                        dst_hit = record.get("ioc_dst") == "YES" if ioc_dst else False
+                        has_ioc = src_hit or dst_hit
+                        if has_ioc:
+                            ioc_hits += 1
+                            ioc_hits_by_vendor[record.get("vendor", "(sin_vendor)")] += 1
+                        if ioc_only and not has_ioc:
+                            skipped += 1
+                            continue
+                        writer.writerow({col: record.get(col, "") for col in output_columns})
+                        parsed += 1
+                        vendor_counts[record.get("vendor", "(sin_vendor)")] += 1
+                q.put(("done", output_file))
+                return
+            # ── fin path CSV columnar ─────────────────────────────────────────
 
             with (
                 open(log_file, encoding="utf-8", errors="replace") as fin,
@@ -2474,12 +3426,23 @@ class MasterOfParserGUI:
                         continue
 
                     record = unify_cim_record(record, forti_src_zone_mode)
+                    record.update(_empty_ipapi("src"))
+                    record.update(_empty_ipapi("dst"))
 
                     # Merge columnas QRadar (no sobreescriben campos del payload)
                     if qradar_extra:
                         for k, v in qradar_extra.items():
                             if v and not record.get(k):
                                 record[k] = v
+
+                    if not record.get("src_ip"):
+                        record["src_ip"] = record.get("qradar_src_ip", "")
+                    if not record.get("dest_ip"):
+                        record["dest_ip"] = record.get("qradar_dest_ip", "")
+                    if not record.get("src_port"):
+                        record["src_port"] = record.get("qradar_src_port", "")
+                    if not record.get("dest_port"):
+                        record["dest_port"] = record.get("qradar_dest_port", "")
 
                     vendor_name = record.get("vendor", "(sin_vendor)")
                     vendor_counts[vendor_name] += 1
@@ -2517,6 +3480,28 @@ class MasterOfParserGUI:
                                 ioc_map,
                                 "dst",
                                 ioc_raw_keys,
+                            )
+                        )
+                    if ipapi_src:
+                        record.update(
+                            enrich_ipapi_candidates(
+                                [
+                                    record.get("src_ip", ""),
+                                    record.get("src_ip_nat", ""),
+                                ],
+                                ipapi_map,
+                                "src",
+                            )
+                        )
+                    if ipapi_dst:
+                        record.update(
+                            enrich_ipapi_candidates(
+                                [
+                                    record.get("dest_ip", ""),
+                                    record.get("dest_ip_nat", ""),
+                                ],
+                                ipapi_map,
+                                "dst",
                             )
                         )
 
@@ -2635,8 +3620,11 @@ class MasterOfParserGUI:
         self._hist_to_var.set("")
         self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
         self._hist_filter1_value_var.set("")
+        self._hist_filter1_not_var.set(False)
         self._hist_filter2_field_var.set(_NO_FILTER_FIELD)
         self._hist_filter2_value_var.set("")
+        self._hist_filter2_not_var.set(False)
+        self._hist_filter_mode_var.set("AND")
         self._hist_bucket_var.set("Día")
         self._hist_metric_var.set("Recuento")
         self._hist_topn_var.set("8")
@@ -2722,8 +3710,18 @@ class MasterOfParserGUI:
         self._filter_cancelled = False
         self._render_result_filter_chips()
         # Actualizar comboboxes en Análisis e Histogramas
-        extra = [c for c in cols if c not in _PIVOT_FIELDS]
-        analysis_fields = _DERIVED_ANALYSIS_FIELDS + _PIVOT_FIELDS + extra
+        extra = []
+        known_analysis_fields = set(_DERIVED_ANALYSIS_FIELDS) | set(_PIVOT_FIELDS)
+        for col in cols:
+            if _canonical_column_name(col) in known_analysis_fields:
+                continue
+            extra.append(col)
+        analysis_fields = []
+        for field_name in _DERIVED_ANALYSIS_FIELDS + _PIVOT_FIELDS + extra:
+            if field_name in analysis_fields:
+                continue
+            if field_name in _DERIVED_ANALYSIS_FIELDS or self._field_exists_for_analysis(field_name):
+                analysis_fields.append(field_name)
         self._pivot_col_cb["values"] = analysis_fields
         self._pivot_secondary_col_cb["values"] = [_NO_SECONDARY_FIELD] + analysis_fields
         self._analysis_filter1_field_cb["values"] = [_NO_FILTER_FIELD] + analysis_fields
@@ -2911,7 +3909,14 @@ class MasterOfParserGUI:
     def _format_result_filter_label(self, filter_item: dict) -> str:
         value = filter_item.get("value", "")
         field = filter_item.get("field", "(todas)")
-        if value.startswith("!"):
+        if filter_item.get("meta") == "ioc_type_quick":
+            return f"IOC type = {', '.join(filter_item.get('targets') or [])}"
+        if filter_item.get("meta") == "ipapi_dst_quick":
+            return f"IPAPI dst = {', '.join(filter_item.get('targets') or [])}"
+        if value.startswith("!="):
+            op = "≠"
+            show_value = value[2:].strip()
+        elif value.startswith("!"):
             op = "≠"
             show_value = value[1:].strip()
         elif value.startswith("="):
@@ -2921,6 +3926,28 @@ class MasterOfParserGUI:
             op = "≈"
             show_value = value
         return f"{field} {op} {show_value}"
+
+    def _normalize_filter_value(self, raw_value: str, negate: bool = False) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        if not negate:
+            return value
+        if value.startswith(("!=", "!")):
+            return value
+        if value.startswith("="):
+            return f"!={value[1:].strip()}"
+        return f"!{value}"
+
+    def _split_filter_display(self, raw_value: str) -> tuple[str, str]:
+        value = str(raw_value or "").strip()
+        if value.startswith("!="):
+            return "≠", value[2:].strip()
+        if value.startswith("!"):
+            return "≠", value[1:].strip()
+        if value.startswith("="):
+            return "=", value[1:].strip()
+        return "≈", value
 
     def _render_result_filter_chips(self):
         for child in self._results_filters_frame.winfo_children():
@@ -2960,10 +3987,189 @@ class MasterOfParserGUI:
             # Sin texto, aplicar directamente (por si hay fechas)
             self._apply_filter()
             return
+        value = self._normalize_filter_value(
+            value,
+            getattr(self, "_results_filter_not_var", tk.BooleanVar(value=False)).get(),
+        )
         self._results_filters.append({"field": field or "(todas)", "value": value})
         self._filter_var.set("")
+        if hasattr(self, "_results_filter_not_var"):
+            self._results_filter_not_var.set(False)
         self._render_result_filter_chips()
         # No auto-apply: el usuario pulsa '🔍 Buscar' cuando esté listo
+
+    def _ioc_type_filter_columns(self) -> list[str]:
+        candidates = [
+            "canon_threat_type_primary",
+            "canon_threat_type_tags",
+            "ioc_src_type",
+            "ioc_dst_type",
+            "ioc_src_tags",
+            "ioc_dst_tags",
+            "ioc_src_raw_canon_threat_type_primary",
+            "ioc_dst_raw_canon_threat_type_primary",
+            "ioc_src_raw_canon_threat_type_tags",
+            "ioc_dst_raw_canon_threat_type_tags",
+        ]
+        return [col for col in candidates if col in self._csv_columns]
+
+    def _clear_quick_ioc_type_filters(self):
+        self._results_filters = [
+            item
+            for item in self._results_filters
+            if item.get("meta") != "ioc_type_quick"
+        ]
+
+    def _clear_results_ioc_type_filter(self):
+        for v in getattr(self, "_results_ioc_type_vars", {}).values():
+            v.set(False)
+        self._apply_quick_ioc_type_filter()
+
+    def _clear_quick_ipapi_dst_filters(self):
+        self._results_filters = [
+            item
+            for item in self._results_filters
+            if item.get("meta") != "ipapi_dst_quick"
+        ]
+
+    def _clear_results_ipapi_dst_filter(self):
+        for v in getattr(self, "_results_ipapi_dst_vars", {}).values():
+            v.set(False)
+        self._apply_quick_ipapi_dst_filter()
+
+    def _apply_quick_ioc_type_filter(self):
+        if not self._all_rows:
+            self._status_var.set("Carga un CSV antes de usar filtros IOC rápidos.")
+            return
+
+        self._clear_quick_ioc_type_filters()
+
+        selected = [
+            k for k, v in getattr(self, "_results_ioc_type_vars", {}).items() if v.get()
+        ]
+        if selected:
+            cols = self._ioc_type_filter_columns()
+            if not cols:
+                self._status_var.set(
+                    "No hay columnas IOC de tipo disponibles en este CSV."
+                )
+                self._render_result_filter_chips()
+                return
+            self._results_filters.append(
+                {
+                    "field": "IOC type",
+                    "value": f"={','.join(selected)}",
+                    "targets": selected,
+                    "meta": "ioc_type_quick",
+                    "columns": cols,
+                }
+            )
+
+        self._render_result_filter_chips()
+        self._apply_filter()
+
+    def _apply_quick_ipapi_dst_filter(self):
+        if not self._all_rows:
+            self._status_var.set("Carga un CSV antes de usar filtros IPAPI rápidos.")
+            return
+
+        self._clear_quick_ipapi_dst_filters()
+
+        selected = [
+            key
+            for key, value in getattr(self, "_results_ipapi_dst_vars", {}).items()
+            if value.get()
+        ]
+        if selected:
+            has_any_ipapi = any(col in self._csv_columns for col in IPAPI_DST_COLUMNS)
+            if not has_any_ipapi:
+                self._status_var.set(
+                    "No hay columnas IPAPI dst disponibles en este CSV."
+                )
+                self._render_result_filter_chips()
+                return
+            self._ensure_results_columns_visible(_IPAPI_DST_QUICK_VISIBLE_COLUMNS)
+            self._results_filters.append(
+                {
+                    "field": "IPAPI tipo",
+                    "value": f"={','.join(selected)}",
+                    "targets": selected,
+                    "meta": "ipapi_dst_quick",
+                }
+            )
+
+        self._render_result_filter_chips()
+        self._apply_filter()
+
+    def _row_matches_quick_ioc_type(self, row: list, filter_item: dict) -> bool:
+        targets = list(filter_item.get("targets") or [])
+        if not targets:
+            # Legado / fallback: parsear desde el string "value"
+            raw = str(filter_item.get("value", "")).strip().lstrip("=").lower()
+            if not raw or raw == "todos":
+                return True
+            targets = [t.strip() for t in raw.split(",") if t.strip()]
+        if not targets:
+            return True
+
+        targets_set = set(targets)
+        columns = filter_item.get("columns", []) or []
+        for col in columns:
+            value = str(self._get_row_value(row, col) or "").strip().lower()
+            if not value:
+                continue
+            parts = {p.strip() for p in value.split(",") if p.strip()} | {value}
+            if parts & targets_set:
+                return True
+        return False
+
+    def _row_matches_quick_ipapi_dst(self, row: list, filter_item: dict) -> bool:
+        targets = list(filter_item.get("targets") or [])
+        if not targets:
+            raw = str(filter_item.get("value", "")).strip().lstrip("=").lower()
+            targets = [t.strip() for t in raw.split(",") if t.strip()]
+        if not targets:
+            return True
+
+        proxy_value = str(self._get_row_value(row, "ipapi_dst_proxy") or "").strip().lower()
+        hosting_value = str(self._get_row_value(row, "ipapi_dst_hosting") or "").strip().lower()
+        mobile_value = str(self._get_row_value(row, "ipapi_dst_mobile") or "").strip().lower()
+
+        for target in targets:
+            if target == "proxy" and not _truthy(proxy_value):
+                return False
+            if target == "hosting" and not _truthy(hosting_value):
+                return False
+            if target == "mobile" and not _truthy(mobile_value):
+                return False
+        return True
+
+    def _ensure_results_columns_visible(self, columns: list[str]):
+        if not getattr(self, "_csv_columns", None):
+            return
+
+        wanted = [col for col in columns if col in self._csv_columns]
+        if not wanted:
+            return
+
+        self._hidden_columns = {col for col in self._hidden_columns if col not in wanted}
+
+        ordered = [col for col in self._display_columns if col in self._csv_columns]
+        insert_at = len(ordered)
+        for anchor in ("ipapi_dst_reasons", "ipapi_dst_risk_level", "ipapi_dst_score"):
+            if anchor in ordered:
+                insert_at = ordered.index(anchor)
+                break
+
+        for col in reversed(wanted):
+            if col in ordered:
+                ordered.remove(col)
+            ordered.insert(insert_at, col)
+
+        ordered += [
+            col for col in self._csv_columns if col not in ordered and col not in self._hidden_columns
+        ]
+        self._display_columns = ordered
 
     def _remove_result_filter(self, idx: int):
         if 0 <= idx < len(self._results_filters):
@@ -2976,8 +4182,14 @@ class MasterOfParserGUI:
         pending = self._filter_var.get().strip()
         if pending:
             field = self._filter_col_var.get().strip()
+            pending = self._normalize_filter_value(
+                pending,
+                getattr(self, "_results_filter_not_var", tk.BooleanVar(value=False)).get(),
+            )
             self._results_filters.append({"field": field or "(todas)", "value": pending})
             self._filter_var.set("")
+            if hasattr(self, "_results_filter_not_var"):
+                self._results_filter_not_var.set(False)
             self._render_result_filter_chips()
         has_dates = bool(
             self._results_from_var.get().strip() or self._results_to_var.get().strip()
@@ -2999,6 +4211,10 @@ class MasterOfParserGUI:
             if "timestamp" in self._csv_columns
             else -1
         )
+        filter_mode = str(
+            getattr(self, "_results_filter_mode_var", tk.StringVar(value="AND")).get()
+        ).strip().upper()
+        use_or_mode = filter_mode == "OR"
 
         for idx, row in enumerate(self._all_rows):
             if idx % 5000 == 0:
@@ -3008,13 +4224,25 @@ class MasterOfParserGUI:
                         f"Búsqueda cancelada · {len(filtered):,} filas parciales"
                     )
                     return
-            ok = True
+            ok = not self._results_filters if use_or_mode else True
             for filter_item in self._results_filters:
-                field = filter_item.get("field", "(todas)")
-                value = filter_item.get("value", "")
-                if not self._apply_generic_filter(row, field, value):
-                    ok = False
-                    break
+                if filter_item.get("meta") == "ioc_type_quick":
+                    matched = self._row_matches_quick_ioc_type(row, filter_item)
+                elif filter_item.get("meta") == "ipapi_dst_quick":
+                    matched = self._row_matches_quick_ipapi_dst(row, filter_item)
+                else:
+                    field = filter_item.get("field", "(todas)")
+                    value = filter_item.get("value", "")
+                    matched = self._apply_generic_filter(row, field, value)
+
+                if use_or_mode:
+                    if matched:
+                        ok = True
+                        break
+                else:
+                    if not matched:
+                        ok = False
+                        break
             if not ok:
                 continue
             if start_dt or end_dt:
@@ -3040,6 +4268,8 @@ class MasterOfParserGUI:
             extra.append(f"desde {self._results_from_var.get().strip()}")
         if end_dt:
             extra.append(f"hasta {self._results_to_var.get().strip()}")
+        if self._results_filters:
+            extra.append(f"modo {filter_mode}")
         suffix = f" | {' | '.join(extra)}" if extra else ""
         self._status_var.set(
             f"{len(filtered):,} de {len(self._all_rows):,} filas filtradas{suffix}"
@@ -3048,6 +4278,12 @@ class MasterOfParserGUI:
     def _clear_filter(self):
         self._filter_cancelled = True
         self._filter_var.set("")
+        if hasattr(self, "_results_filter_not_var"):
+            self._results_filter_not_var.set(False)
+        for value in getattr(self, "_results_ioc_type_vars", {}).values():
+            value.set(False)
+        for value in getattr(self, "_results_ipapi_dst_vars", {}).values():
+            value.set(False)
         self._results_from_var.set("")
         self._results_to_var.set("")
         self._results_filters = []
@@ -3088,6 +4324,19 @@ class MasterOfParserGUI:
         m.delete(0, "end")
 
         if col_name:
+            m.add_command(
+                label=f"📋  Copiar celda",
+                command=lambda: self._copy_to_clipboard(cell_value),
+            )
+            if row_id:
+                row_values = self._tree.item(row_id, "values")
+                visible_cols = self._tree["columns"]
+                row_text = "\t".join(str(v) for v in row_values[:len(visible_cols)])
+                m.add_command(
+                    label="📋  Copiar fila completa (TSV)",
+                    command=lambda rt=row_text: self._copy_to_clipboard(rt),
+                )
+            m.add_separator()
             m.add_command(
                 label=f'✅  Filtrar tabla: {col_name} = "{cell_value}"',
                 command=lambda: self._results_filter_by(col_name, f"={cell_value}"),
@@ -3138,6 +4387,12 @@ class MasterOfParserGUI:
 
         if m.index("end") is not None:
             m.tk_popup(event.x_root, event.y_root)
+
+    def _copy_to_clipboard(self, text: str):
+        """Copia texto al portapapeles del sistema."""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(text))
+        self.root.update()
 
     def _results_filter_by(self, col_name: str, value: str):
         """Aplica filtro en la tabla de Resultados directamente."""
@@ -3298,6 +4553,8 @@ class MasterOfParserGUI:
 
     def _on_tree_left_release(self, event):
         if not self._header_drag_col:
+            # resize nativo: forzar repintado de celdas (bug Tkinter/Windows)
+            self._tree.after(1, self._tree.update_idletasks)
             return
 
         try:
@@ -3315,12 +4572,14 @@ class MasterOfParserGUI:
                     self._display_columns = display_cols
                     self._tree["displaycolumns"] = tuple(display_cols)
                     self._suppress_sort_once = True
+                    self._tree.after(1, self._tree.update_idletasks)
                     return "break"
         except (ValueError, tk.TclError):
             pass
         finally:
             self._header_drag_col = ""
             self._header_drag_active = False
+            self._tree.after(1, self._tree.update_idletasks)
 
         return None
 
@@ -3338,22 +4597,31 @@ class MasterOfParserGUI:
         self._analysis_vendor_var.set(vendor_filter)
         self._analysis_from_var.set(self._results_from_var.get().strip())
         self._analysis_to_var.set(self._results_to_var.get().strip())
+        self._analysis_filter_mode_var.set(
+            self._results_filter_mode_var.get().strip() or "AND"
+        )
 
         self._analysis_filter1_field_var.set(_NO_FILTER_FIELD)
         self._analysis_filter1_value_var.set("")
         self._analysis_filter2_field_var.set(_NO_FILTER_FIELD)
         self._analysis_filter2_value_var.set("")
+        self._analysis_filter1_not_var.set(False)
+        self._analysis_filter2_not_var.set(False)
 
         if non_vendor_filters:
+            value1 = str(non_vendor_filters[0].get("value", "")).strip()
             self._analysis_filter1_field_var.set(
                 non_vendor_filters[0].get("field", _NO_FILTER_FIELD)
             )
-            self._analysis_filter1_value_var.set(non_vendor_filters[0].get("value", ""))
+            self._analysis_filter1_not_var.set(value1.startswith(("!=", "!")))
+            self._analysis_filter1_value_var.set(f"={value1[2:].strip()}" if value1.startswith("!=") else value1[1:].strip() if value1.startswith("!") else value1)
         if len(non_vendor_filters) > 1:
+            value2 = str(non_vendor_filters[1].get("value", "")).strip()
             self._analysis_filter2_field_var.set(
                 non_vendor_filters[1].get("field", _NO_FILTER_FIELD)
             )
-            self._analysis_filter2_value_var.set(non_vendor_filters[1].get("value", ""))
+            self._analysis_filter2_not_var.set(value2.startswith(("!=", "!")))
+            self._analysis_filter2_value_var.set(f"={value2[2:].strip()}" if value2.startswith("!=") else value2[1:].strip() if value2.startswith("!") else value2)
         if len(non_vendor_filters) > 2:
             messagebox.showinfo(
                 "Filtros trasladados",
@@ -3365,13 +4633,14 @@ class MasterOfParserGUI:
         self, slot: int, col_name: str, value: str, exclude: bool = False
     ):
         """Envía col=valor como Filtro 1 o Filtro 2 en Análisis y cambia a esa pestaña."""
-        formatted = f"!{value}" if exclude else f"={value}"
         if slot == 1:
             self._analysis_filter1_field_var.set(col_name)
-            self._analysis_filter1_value_var.set(formatted)
+            self._analysis_filter1_not_var.set(exclude)
+            self._analysis_filter1_value_var.set(f"={value}")
         else:
             self._analysis_filter2_field_var.set(col_name)
-            self._analysis_filter2_value_var.set(formatted)
+            self._analysis_filter2_not_var.set(exclude)
+            self._analysis_filter2_value_var.set(f"={value}")
         self._nb.select(self._tab_analysis)
 
     def _send_to_analysis_group(self, col_name: str):
@@ -3541,8 +4810,15 @@ class MasterOfParserGUI:
         self._analysis_filter1_field_cb.pack(fill="x", pady=(0, 4))
         self._analysis_filter1_value_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._analysis_filter1_value_var).pack(
-            fill="x", pady=(0, 8)
+            fill="x", pady=(0, 2)
         )
+        self._analysis_filter1_not_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl,
+            text="NOT",
+            variable=self._analysis_filter1_not_var,
+            command=self._on_analysis_change,
+        ).pack(anchor="w", pady=(0, 8))
 
         ttk.Label(ctrl, text="Filtro 2:").pack(anchor="w")
         self._analysis_filter2_field_var = tk.StringVar(value=_NO_FILTER_FIELD)
@@ -3556,7 +4832,28 @@ class MasterOfParserGUI:
         self._analysis_filter2_field_cb.pack(fill="x", pady=(0, 4))
         self._analysis_filter2_value_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._analysis_filter2_value_var).pack(
-            fill="x", pady=(0, 8)
+            fill="x", pady=(0, 2)
+        )
+        self._analysis_filter2_not_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl,
+            text="NOT",
+            variable=self._analysis_filter2_not_var,
+            command=self._on_analysis_change,
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(ctrl, text="Combinar filtros:").pack(anchor="w")
+        self._analysis_filter_mode_var = tk.StringVar(value="AND")
+        self._analysis_filter_mode_cb = ttk.Combobox(
+            ctrl,
+            textvariable=self._analysis_filter_mode_var,
+            values=("AND", "OR"),
+            state="readonly",
+            width=22,
+        )
+        self._analysis_filter_mode_cb.pack(fill="x", pady=(0, 8))
+        self._analysis_filter_mode_cb.bind(
+            "<<ComboboxSelected>>", lambda _: self._on_analysis_change()
         )
 
         self._analysis_exclude_empty_var = tk.BooleanVar(value=True)
@@ -3600,7 +4897,35 @@ class MasterOfParserGUI:
         self._pivot_ioc_only_var = tk.BooleanVar()
         ttk.Checkbutton(
             ctrl, text="Solo IOC hits", variable=self._pivot_ioc_only_var
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(ctrl, text="IOC tipo:").pack(anchor="w", pady=(4, 0))
+        self._analysis_ioc_type_vars: dict[str, tk.BooleanVar] = {}
+        _ioc_an_frame = ttk.Frame(ctrl)
+        _ioc_an_frame.pack(fill="x", pady=(0, 8))
+        for _col_idx, _ioc_t in enumerate(_IOC_TYPE_QUICK_OPTIONS[1:]):
+            _var = tk.BooleanVar()
+            self._analysis_ioc_type_vars[_ioc_t] = _var
+            ttk.Checkbutton(
+                _ioc_an_frame,
+                text=_ioc_t,
+                variable=_var,
+                command=self._on_analysis_change,
+            ).grid(row=_col_idx // 2, column=_col_idx % 2, sticky="w", padx=(0, 4))
+
+        ttk.Label(ctrl, text="IPAPI tipo:").pack(anchor="w", pady=(0, 0))
+        self._analysis_ipapi_type_vars: dict[str, tk.BooleanVar] = {}
+        _ipapi_an_frame = ttk.Frame(ctrl)
+        _ipapi_an_frame.pack(fill="x", pady=(0, 8))
+        for _col_idx, _ipapi_t in enumerate(_IPAPI_DST_QUICK_OPTIONS):
+            _var = tk.BooleanVar()
+            self._analysis_ipapi_type_vars[_ipapi_t] = _var
+            ttk.Checkbutton(
+                _ipapi_an_frame,
+                text=_ipapi_t,
+                variable=_var,
+                command=self._on_analysis_change,
+            ).grid(row=_col_idx // 2, column=_col_idx % 2, sticky="w", padx=(0, 4))
 
         ttk.Label(ctrl, text="Tipo de gráfico:").pack(anchor="w")
         self._pivot_chart_var = tk.StringVar(value="Barras horizontales")
@@ -3635,6 +4960,19 @@ class MasterOfParserGUI:
         ttk.Button(
             ctrl, text="📋  Exportar detalle (filas)", command=self._export_detail_csv
         ).pack(fill="x", pady=(4, 0))
+
+        # Tamaño letra gráficas
+        ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=(8, 4))
+        font_row = ttk.Frame(ctrl)
+        font_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(font_row, text="Letra gráfico:").pack(side="left")
+        ttk.Spinbox(
+            font_row,
+            textvariable=self._chart_font_var,
+            from_=5, to=24, increment=1, width=4,
+            command=self._generate_pivot,
+        ).pack(side="right")
+
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
 
         ttk.Label(ctrl, text="Anomalías temporales:", font=("", 9, "bold")).pack(
@@ -3673,6 +5011,24 @@ class MasterOfParserGUI:
             text="📅  Histograma temporal",
             command=self._draw_time_histogram,
         ).pack(fill="x", pady=(4, 8))
+
+        analysis_extra_row = ttk.Frame(ctrl)
+        analysis_extra_row.pack(fill="x", pady=(6, 8))
+        ttk.Button(
+            analysis_extra_row,
+            text="Beaconing Detection",
+            command=self._analysis_beaconing,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            analysis_extra_row,
+            text="ASN Clustering Deep",
+            command=self._analysis_asn_deep,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            analysis_extra_row,
+            text="Export Suspicious CSV",
+            command=self._analysis_export_suspicious,
+        ).pack(side="left", padx=(4, 0))
 
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
 
@@ -3909,9 +5265,21 @@ class MasterOfParserGUI:
         vsb_p = ttk.Scrollbar(
             tbl_frame, orient="vertical", command=self._pivot_tree.yview
         )
-        self._pivot_tree.configure(yscrollcommand=vsb_p.set)
-        self._pivot_tree.pack(side="left", fill="both", expand=True)
-        vsb_p.pack(side="right", fill="y")
+        hsb_p = ttk.Scrollbar(
+            tbl_frame, orient="horizontal", command=self._pivot_tree.xview
+        )
+        self._pivot_tree.configure(yscrollcommand=vsb_p.set, xscrollcommand=hsb_p.set)
+        self._pivot_tree.grid(row=0, column=0, sticky="nsew")
+        vsb_p.grid(row=0, column=1, sticky="ns")
+        hsb_p.grid(row=1, column=0, sticky="ew")
+        tbl_frame.rowconfigure(0, weight=1)
+        tbl_frame.columnconfigure(0, weight=1)
+        # repintado tras resize de columna (bug Tkinter/Windows)
+        self._pivot_tree.bind(
+            "<ButtonRelease-1>",
+            lambda e: self._pivot_tree.after(1, self._pivot_tree.update_idletasks),
+            add="+",
+        )
         self._pivot_tree.bind(
             "<Button-3>",
             lambda e: self._show_tree_copy_menu(e, self._pivot_tree),
@@ -3925,6 +5293,9 @@ class MasterOfParserGUI:
             self._fig = Figure(figsize=(8.8, 5.2), dpi=110, facecolor="#ffffff")
             self._canvas_mpl = FigureCanvasTkAgg(self._fig, master=chart_frame)
             self._canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            _tb = NavigationToolbar2Tk(self._canvas_mpl, chart_frame, pack_toolbar=False)
+            _tb.update()
+            _tb.pack(side="bottom", fill="x")
             self._canvas_mpl.mpl_connect(
                 "button_press_event", self._on_analysis_dblclick
             )
@@ -4040,8 +5411,14 @@ class MasterOfParserGUI:
         self._hist_filter1_field_cb.pack(fill="x", pady=(0, 4))
         self._hist_filter1_value_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._hist_filter1_value_var).pack(
-            fill="x", pady=(0, 8)
+            fill="x", pady=(0, 2)
         )
+        self._hist_filter1_not_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl,
+            text="NOT",
+            variable=self._hist_filter1_not_var,
+        ).pack(anchor="w", pady=(0, 8))
 
         ttk.Label(ctrl, text="Filtro 2:").pack(anchor="w")
         self._hist_filter2_field_var = tk.StringVar(value=_NO_FILTER_FIELD)
@@ -4055,8 +5432,24 @@ class MasterOfParserGUI:
         self._hist_filter2_field_cb.pack(fill="x", pady=(0, 4))
         self._hist_filter2_value_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._hist_filter2_value_var).pack(
-            fill="x", pady=(0, 8)
+            fill="x", pady=(0, 2)
         )
+        self._hist_filter2_not_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl,
+            text="NOT",
+            variable=self._hist_filter2_not_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(ctrl, text="Combinar filtros:").pack(anchor="w")
+        self._hist_filter_mode_var = tk.StringVar(value="AND")
+        ttk.Combobox(
+            ctrl,
+            textvariable=self._hist_filter_mode_var,
+            values=("AND", "OR"),
+            state="readonly",
+            width=22,
+        ).pack(fill="x", pady=(0, 8))
 
         ttk.Label(ctrl, text="Intervalo:").pack(anchor="w")
         self._hist_bucket_var = tk.StringVar(value="Día")
@@ -4106,7 +5499,33 @@ class MasterOfParserGUI:
         self._hist_ioc_only_var = tk.BooleanVar()
         ttk.Checkbutton(
             ctrl, text="Solo IOC hits", variable=self._hist_ioc_only_var
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(ctrl, text="IOC tipo:").pack(anchor="w", pady=(4, 0))
+        self._hist_ioc_type_vars: dict[str, tk.BooleanVar] = {}
+        _ioc_hist_frame = ttk.Frame(ctrl)
+        _ioc_hist_frame.pack(fill="x", pady=(0, 8))
+        for _col_idx, _ioc_t in enumerate(_IOC_TYPE_QUICK_OPTIONS[1:]):
+            _var = tk.BooleanVar()
+            self._hist_ioc_type_vars[_ioc_t] = _var
+            ttk.Checkbutton(
+                _ioc_hist_frame,
+                text=_ioc_t,
+                variable=_var,
+            ).grid(row=_col_idx // 2, column=_col_idx % 2, sticky="w", padx=(0, 4))
+
+        ttk.Label(ctrl, text="IPAPI tipo:").pack(anchor="w", pady=(0, 0))
+        self._hist_ipapi_type_vars: dict[str, tk.BooleanVar] = {}
+        _ipapi_hist_frame = ttk.Frame(ctrl)
+        _ipapi_hist_frame.pack(fill="x", pady=(0, 8))
+        for _col_idx, _ipapi_t in enumerate(_IPAPI_DST_QUICK_OPTIONS):
+            _var = tk.BooleanVar()
+            self._hist_ipapi_type_vars[_ipapi_t] = _var
+            ttk.Checkbutton(
+                _ipapi_hist_frame,
+                text=_ipapi_t,
+                variable=_var,
+            ).grid(row=_col_idx // 2, column=_col_idx % 2, sticky="w", padx=(0, 4))
 
         self._hist_generate_btn = ttk.Button(
             ctrl, text="📊  Generar histograma", command=self._generate_histogram_view
@@ -4126,6 +5545,18 @@ class MasterOfParserGUI:
             ctrl, text="💾  Exportar (imagen + CSV)", command=self._export_hist_chart
         ).pack(fill="x", pady=(4, 0))
 
+        # Tamaño letra gráficas
+        ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=(8, 4))
+        font_row_h = ttk.Frame(ctrl)
+        font_row_h.pack(fill="x", pady=(0, 4))
+        ttk.Label(font_row_h, text="Letra gráfico:").pack(side="left")
+        ttk.Spinbox(
+            font_row_h,
+            textvariable=self._chart_font_var,
+            from_=5, to=24, increment=1, width=4,
+            command=self._generate_histogram_view,
+        ).pack(side="right")
+
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
         ttk.Label(ctrl, text="Ejemplos:", font=("", 9, "bold")).pack(
             anchor="w", pady=(0, 4)
@@ -4142,15 +5573,31 @@ class MasterOfParserGUI:
 
         tbl_frame = ttk.LabelFrame(right, text="Series", padding=4)
         right.add(tbl_frame, weight=1)
+        tbl_top = ttk.Frame(tbl_frame)
+        tbl_top.pack(fill="x", pady=(0, 4))
+        self._hist_table_by_bucket_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            tbl_top,
+            text="Tabla por día/intervalo",
+            variable=self._hist_table_by_bucket_var,
+            command=self._refresh_histogram_tree,
+        ).pack(side="left")
         self._hist_tree = ttk.Treeview(
             tbl_frame, show="headings", height=8, selectmode="extended"
         )
         hist_vsb = ttk.Scrollbar(
             tbl_frame, orient="vertical", command=self._hist_tree.yview
         )
-        self._hist_tree.configure(yscrollcommand=hist_vsb.set)
+        hist_hsb = ttk.Scrollbar(
+            tbl_frame, orient="horizontal", command=self._hist_tree.xview
+        )
+        self._hist_tree.configure(
+            yscrollcommand=hist_vsb.set,
+            xscrollcommand=hist_hsb.set,
+        )
         self._hist_tree.pack(side="left", fill="both", expand=True)
         hist_vsb.pack(side="right", fill="y")
+        hist_hsb.pack(side="bottom", fill="x")
         self._hist_tree.bind(
             "<Button-3>",
             lambda e: self._show_tree_copy_menu(e, self._hist_tree),
@@ -4165,6 +5612,9 @@ class MasterOfParserGUI:
                 self._hist_fig, master=chart_frame
             )
             self._hist_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            _tb_hist = NavigationToolbar2Tk(self._hist_canvas_mpl, chart_frame, pack_toolbar=False)
+            _tb_hist.update()
+            _tb_hist.pack(side="bottom", fill="x")
             self._hist_canvas_mpl.mpl_connect(
                 "button_press_event", self._on_hist_dblclick
             )
@@ -4305,6 +5755,19 @@ class MasterOfParserGUI:
             command=self._export_asn_chart,
         ).pack(fill="x", pady=(0, 4))
 
+        font_row_asn = ttk.Frame(ctrl)
+        font_row_asn.pack(fill="x", pady=(4, 4))
+        ttk.Label(font_row_asn, text="Letra gráfico:").pack(side="left")
+        ttk.Spinbox(
+            font_row_asn,
+            textvariable=self._chart_font_var,
+            from_=5,
+            to=24,
+            increment=1,
+            width=4,
+            command=self._refresh_asn_view,
+        ).pack(side="right")
+
         ttk.Separator(ctrl, orient="horizontal").pack(fill="x", pady=8)
         ttk.Label(ctrl, text="Resumen:", font=("", 9, "bold")).pack(
             anchor="w", pady=(0, 4)
@@ -4340,7 +5803,9 @@ class MasterOfParserGUI:
         tbl_frame = ttk.LabelFrame(right, text="ASN × Datos CIM", padding=4)
         right.add(tbl_frame, minsize=120, stretch="always")
 
-        self._asn_tree = ttk.Treeview(tbl_frame, show="headings", height=14)
+        self._asn_tree = ttk.Treeview(
+            tbl_frame, show="headings", height=14, style="Asn.Treeview"
+        )
         asn_vsb = ttk.Scrollbar(
             tbl_frame, orient="vertical", command=self._asn_tree.yview
         )
@@ -4364,6 +5829,9 @@ class MasterOfParserGUI:
             self._asn_fig = Figure(figsize=(8.8, 4.5), dpi=110, facecolor="#ffffff")
             self._asn_canvas_mpl = FigureCanvasTkAgg(self._asn_fig, master=chart_frame)
             self._asn_canvas_mpl.get_tk_widget().pack(fill="both", expand=True)
+            _tb_asn = NavigationToolbar2Tk(self._asn_canvas_mpl, chart_frame, pack_toolbar=False)
+            _tb_asn.update()
+            _tb_asn.pack(side="bottom", fill="x")
             self._asn_canvas_mpl.mpl_connect(
                 "button_press_event", self._on_asn_chart_rightclick
             )
@@ -4375,6 +5843,28 @@ class MasterOfParserGUI:
                 justify="center",
                 foreground="gray",
             ).pack(expand=True)
+
+        self._apply_asn_tree_fontscale()
+
+    def _apply_asn_tree_fontscale(self):
+        base = max(6, self._chart_font_var.get())
+        style = ttk.Style(self.root)
+        style.configure(
+            "Asn.Treeview",
+            font=("Segoe UI", base),
+            rowheight=max(22, base * 2 + 6),
+        )
+        style.configure(
+            "Asn.Treeview.Heading",
+            font=("Segoe UI", max(7, base), "bold"),
+        )
+
+    def _refresh_asn_view(self):
+        self._apply_asn_tree_fontscale()
+        if self._asn_cross_results:
+            self._render_asn_results()
+        else:
+            self._show_asn_list()
 
     # ── ASN: cargar CSV ──────────────────────────────────────────────────────
     def _load_asn_csv(self):
@@ -4572,6 +6062,14 @@ class MasterOfParserGUI:
         self._asn_progress_var.set(100)
         self._asn_progress_bar.pack_forget()
         self._asn_cross_results = asn_hits
+        if not asn_hits:
+            total_in_list = len(self._asn_map)
+            self._asn_summary_var.set(
+                f"0 ASN encontrados en los datos CIM\n"
+                f"(de {total_in_list} en la lista)"
+            )
+            self._show_asn_list()
+            return
         self._render_asn_results()
 
     def _get_asn_rep_filter_set(self) -> set[str]:
@@ -4593,7 +6091,7 @@ class MasterOfParserGUI:
         """Renderiza tabla + gráfico ASN desde _asn_cross_results aplicando filtros."""
         asn_hits = self._asn_cross_results
         if not asn_hits:
-            self._status_var.set("Cruza primero los datos ASN con CIM.")
+            self._show_asn_list()
             return
 
         tree = self._asn_tree
@@ -4737,6 +6235,7 @@ class MasterOfParserGUI:
                 color="#999999",
                 transform=ax.transAxes,
             )
+            self._apply_chart_fontscale(self._asn_fig)
             self._asn_fig.tight_layout()
             self._asn_canvas_mpl.draw()
             return
@@ -4793,6 +6292,7 @@ class MasterOfParserGUI:
         )
         leg.set_draggable(True)
 
+        self._apply_chart_fontscale(self._asn_fig)
         self._asn_fig.tight_layout()
         self._asn_canvas_mpl.draw()
 
@@ -4827,12 +6327,15 @@ class MasterOfParserGUI:
                 self._pivot_col_var.set("dest_ip")
                 self._pivot_secondary_col_var.set("src_ip")
                 self._analysis_filter1_field_var.set("asn_dst_name")
+                self._analysis_filter1_not_var.set(False)
                 self._analysis_filter1_value_var.set(f"={asn_name}")
                 if has_rep_filter:
                     self._analysis_filter2_field_var.set("asn_dst_reputation")
+                    self._analysis_filter2_not_var.set(False)
                     self._analysis_filter2_value_var.set(rep_filter_val)
                 else:
                     self._analysis_filter2_field_var.set(_NO_FILTER_FIELD)
+                    self._analysis_filter2_not_var.set(False)
                     self._analysis_filter2_value_var.set("")
                 self._nb.select(self._tab_analysis)
                 self._generate_pivot()
@@ -4843,11 +6346,14 @@ class MasterOfParserGUI:
         self._pivot_secondary_col_var.set("dest_ip")
         if has_rep_filter:
             self._analysis_filter1_field_var.set("asn_dst_reputation")
+            self._analysis_filter1_not_var.set(False)
             self._analysis_filter1_value_var.set(rep_filter_val)
         else:
             self._analysis_filter1_field_var.set(_NO_FILTER_FIELD)
+            self._analysis_filter1_not_var.set(False)
             self._analysis_filter1_value_var.set("")
         self._analysis_filter2_field_var.set(_NO_FILTER_FIELD)
+        self._analysis_filter2_not_var.set(False)
         self._analysis_filter2_value_var.set("")
         self._nb.select(self._tab_analysis)
 
@@ -4871,10 +6377,14 @@ class MasterOfParserGUI:
             # Construir filtro OR con match exacto
             filter_val = " OR ".join(f"={r}" for r in sorted(rep_selected))
             self._hist_filter1_field_var.set("asn_dst_reputation")
+            self._hist_filter1_not_var.set(False)
             self._hist_filter1_value_var.set(filter_val)
         else:
             self._hist_filter1_field_var.set(_NO_FILTER_FIELD)
+            self._hist_filter1_not_var.set(False)
             self._hist_filter1_value_var.set("")
+        self._hist_filter2_not_var.set(False)
+        self._hist_filter_mode_var.set("AND")
 
         self._nb.select(self._tab_histograms)
 
@@ -5108,8 +6618,11 @@ class MasterOfParserGUI:
             self._hist_to_var,
             self._hist_filter1_field_var,
             self._hist_filter1_value_var,
+            self._hist_filter1_not_var,
             self._hist_filter2_field_var,
             self._hist_filter2_value_var,
+            self._hist_filter2_not_var,
+            self._hist_filter_mode_var,
             self._hist_bucket_var,
             self._hist_metric_var,
             self._hist_topn_var,
@@ -5163,7 +6676,7 @@ class MasterOfParserGUI:
                 return
             if to_value and self._parse_time_bound(to_value, is_end=True) is None:
                 return
-            self._generate_histogram_view()
+            self._generate_histogram_view(show_dialogs=False)
 
         self._hist_refresh_after_id = self.root.after(300, _refresh)
 
@@ -5187,13 +6700,24 @@ class MasterOfParserGUI:
         self._analysis_filter1_value_var.set(f1_value)
         self._analysis_filter2_field_var.set(f2_field or _NO_FILTER_FIELD)
         self._analysis_filter2_value_var.set(f2_value)
+        self._analysis_filter1_not_var.set(str(f1_value or "").strip().startswith(("!=", "!")))
+        self._analysis_filter2_not_var.set(str(f2_value or "").strip().startswith(("!=", "!")))
+        if str(f1_value or "").strip().startswith("!="):
+            self._analysis_filter1_value_var.set(str(f1_value).strip()[2:].strip())
+        elif str(f1_value or "").strip().startswith(("!", "=")):
+            self._analysis_filter1_value_var.set(str(f1_value).strip()[1:].strip())
+        if str(f2_value or "").strip().startswith("!="):
+            self._analysis_filter2_value_var.set(str(f2_value).strip()[2:].strip())
+        elif str(f2_value or "").strip().startswith(("!", "=")):
+            self._analysis_filter2_value_var.set(str(f2_value).strip()[1:].strip())
         if ioc_only is not None:
             self._pivot_ioc_only_var.set(ioc_only)
         self._generate_pivot()
 
     def _get_row_value(self, row: list, field_name: str) -> str:
-        if field_name in self._csv_columns:
-            return str(row[self._csv_columns.index(field_name)] or "").strip()
+        for candidate in _column_name_candidates(field_name):
+            if candidate in self._csv_columns:
+                return str(row[self._csv_columns.index(candidate)] or "").strip()
 
         src_ip = (
             self._get_row_value(row, "src_ip") if "src_ip" in self._csv_columns else ""
@@ -5271,7 +6795,12 @@ class MasterOfParserGUI:
         return ""
 
     def _field_exists_for_analysis(self, field_name: str) -> bool:
-        if field_name in self._csv_columns or field_name in _DERIVED_ANALYSIS_FIELDS:
+        if field_name in _DERIVED_ANALYSIS_FIELDS:
+            return True
+        if any(
+            candidate in self._csv_columns
+            for candidate in _column_name_candidates(field_name)
+        ):
             return True
         # ASN virtual fields exist only when ASN map is loaded
         if field_name.startswith("asn_") and self._asn_map:
@@ -5344,13 +6873,21 @@ class MasterOfParserGUI:
         """Evalúa una condición simple (sin OR). Soporta *, ! y =."""
         from fnmatch import fnmatch
 
-        exact = raw_value.startswith("=")
-        exclude = raw_value.startswith("!")
-        cmp_value = raw_value[1:].strip() if (exact or exclude) else raw_value
+        exact_exclude = raw_value.startswith("!=")
+        exact = raw_value.startswith("=") and not exact_exclude
+        exclude = raw_value.startswith("!") and not exact_exclude
+        if exact_exclude:
+            cmp_value = raw_value[2:].strip()
+        else:
+            cmp_value = raw_value[1:].strip() if (exact or exclude) else raw_value
         cmp_value = cmp_value.lower()
 
         has_wildcard = "*" in cmp_value or "?" in cmp_value
 
+        if exact_exclude:
+            if has_wildcard:
+                return not fnmatch(cell_value, cmp_value)
+            return cell_value != cmp_value
         if exact:
             if has_wildcard:
                 return fnmatch(cell_value, cmp_value)
@@ -5387,9 +6924,12 @@ class MasterOfParserGUI:
         filter1_value: str,
         filter2_field: str,
         filter2_value: str,
+        filter_mode: str = "AND",
         ioc_only: bool = False,
         from_value: str = "",
         to_value: str = "",
+        ioc_types: list[str] | None = None,
+        ipapi_types: list[str] | None = None,
     ) -> list:
         start_dt = self._parse_time_bound(from_value, is_end=False)
         end_dt = self._parse_time_bound(to_value, is_end=True)
@@ -5417,10 +6957,39 @@ class MasterOfParserGUI:
                 )
                 if not (src_ioc or dst_ioc):
                     continue
-            if not self._apply_generic_filter(row, filter1_field, filter1_value):
-                continue
-            if not self._apply_generic_filter(row, filter2_field, filter2_value):
-                continue
+            filter_checks = []
+            if filter1_field and filter1_field != _NO_FILTER_FIELD and filter1_value:
+                filter_checks.append(
+                    self._apply_generic_filter(row, filter1_field, filter1_value)
+                )
+            if filter2_field and filter2_field != _NO_FILTER_FIELD and filter2_value:
+                filter_checks.append(
+                    self._apply_generic_filter(row, filter2_field, filter2_value)
+                )
+            if filter_checks:
+                if str(filter_mode or "AND").strip().upper() == "OR":
+                    if not any(filter_checks):
+                        continue
+                else:
+                    if not all(filter_checks):
+                        continue
+            if ioc_types:
+                ioc_type_cols = self._ioc_type_filter_columns()
+                _targets_set = set(ioc_types)
+                matched = False
+                for _col in ioc_type_cols:
+                    _val = str(self._get_row_value(row, _col) or "").strip().lower()
+                    if not _val:
+                        continue
+                    _parts = {p.strip() for p in _val.split(",") if p.strip()} | {_val}
+                    if _parts & _targets_set:
+                        matched = True
+                        break
+                if not matched:
+                    continue
+            if ipapi_types:
+                if not self._row_matches_quick_ipapi_dst(row, {"targets": ipapi_types}):
+                    continue
             if start_dt or end_dt:
                 if timestamp_idx < 0:
                     continue
@@ -5441,6 +7010,7 @@ class MasterOfParserGUI:
         filter1_value: str,
         filter2_field: str,
         filter2_value: str,
+        filter_mode: str = "AND",
         ioc_only: bool = False,
         from_value: str = "",
         to_value: str = "",
@@ -5453,16 +7023,10 @@ class MasterOfParserGUI:
             (filter2_field, filter2_value),
         ):
             if field_name and field_name != _NO_FILTER_FIELD and field_value:
-                if field_value.startswith("!"):
-                    op = "≠"
-                    value = field_value[1:].strip()
-                elif field_value.startswith("="):
-                    op = "="
-                    value = field_value[1:].strip()
-                else:
-                    op = "≈"
-                    value = field_value.strip()
+                op, value = self._split_filter_display(field_value)
                 parts.append(f"{field_name}{op}{value}")
+        if filter1_value and filter2_value:
+            parts.append(f"modo={str(filter_mode or 'AND').strip().upper()}")
         if from_value:
             parts.append(f"desde={from_value}")
         if to_value:
@@ -5472,17 +7036,289 @@ class MasterOfParserGUI:
         return "  |  ".join(parts)
 
     def _get_analysis_rows(self, rows: list) -> list:
+        filter1_value = self._normalize_filter_value(
+            self._analysis_filter1_value_var.get().strip(),
+            self._analysis_filter1_not_var.get(),
+        )
+        filter2_value = self._normalize_filter_value(
+            self._analysis_filter2_value_var.get().strip(),
+            self._analysis_filter2_not_var.get(),
+        )
         return self._get_rows_with_filters(
             rows,
             vendor_filter=self._analysis_vendor_var.get().strip(),
             filter1_field=self._analysis_filter1_field_var.get().strip(),
-            filter1_value=self._analysis_filter1_value_var.get().strip(),
+            filter1_value=filter1_value,
             filter2_field=self._analysis_filter2_field_var.get().strip(),
-            filter2_value=self._analysis_filter2_value_var.get().strip(),
+            filter2_value=filter2_value,
+            filter_mode=self._analysis_filter_mode_var.get().strip(),
             ioc_only=self._pivot_ioc_only_var.get(),
             from_value=self._analysis_from_var.get().strip(),
             to_value=self._analysis_to_var.get().strip(),
+            ioc_types=[
+                k for k, v in getattr(self, "_analysis_ioc_type_vars", {}).items() if v.get()
+            ] or None,
+            ipapi_types=[
+                k for k, v in getattr(self, "_analysis_ipapi_type_vars", {}).items() if v.get()
+            ] or None,
         )
+
+    def _get_analysis_df(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            messagebox.showerror(
+                "Pandas no disponible",
+                "Esta función requiere pandas para construir el análisis.",
+            )
+            return None
+
+        if not getattr(self, "_all_rows", None) or not getattr(self, "_csv_columns", None):
+            messagebox.showerror("Error", "No hay datos cargados en Analysis.")
+            return None
+
+        rows = self._get_analysis_rows(self._all_rows)
+        if not rows:
+            messagebox.showinfo(
+                "Sin datos",
+                "No hay filas tras aplicar los filtros actuales de Analysis.",
+            )
+            return None
+
+        try:
+            return pd.DataFrame(rows, columns=self._csv_columns).copy()
+        except Exception as exc:
+            messagebox.showerror("Error", f"No se pudo construir el DataFrame:\n{exc}")
+            return None
+
+    def _show_analysis_df(self, df, title):
+        tree = self._pivot_tree
+        tree.delete(*tree.get_children())
+
+        columns = [str(col) for col in df.columns]
+        tree["columns"] = columns
+
+        for col in columns:
+            tree.heading(col, text=col)
+            tree.column(col, width=130, minwidth=80, anchor="w")
+
+        for row in df.itertuples(index=False, name=None):
+            tree.insert("", "end", values=list(row))
+
+        if getattr(self, "_canvas_mpl", None) is not None:
+            self._fig.clear()
+            self._canvas_mpl.draw()
+            self._analysis_zoom_stack.clear()
+            if hasattr(self, "_analysis_zoom_back_btn"):
+                self._analysis_zoom_back_btn.configure(state="disabled")
+
+        if hasattr(self, "_status_var"):
+            self._status_var.set(f"{title}: {len(df):,} filas")
+
+        if hasattr(self, "_nb") and hasattr(self, "_tab_analysis"):
+            self._nb.select(self._tab_analysis)
+
+    def _check_columns(self, df, cols, name):
+        if not hasattr(df, "columns"):
+            messagebox.showerror("Error", f"{name} no recibió un DataFrame válido.")
+            return False
+
+        missing = [col for col in cols if col not in df.columns]
+        if missing:
+            messagebox.showerror(
+                "Columnas no disponibles",
+                f"{name} requiere estas columnas:\n\n" + "\n".join(missing),
+            )
+            return False
+        return True
+
+    def _analysis_beaconing(self):
+        df = self._get_analysis_df()
+        if df is None:
+            return
+
+        import pandas as pd
+
+        required = [
+            "timestamp",
+            "src_ip",
+            "dest_ip",
+            "ipapi_dst_hosting",
+            "ipapi_dst_asname",
+            "ipapi_dst_country",
+        ]
+        if not self._check_columns(df, required, "Beaconing"):
+            return
+
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["ipapi_dst_hosting"] = (
+            df["ipapi_dst_hosting"].astype(str).str.strip().str.lower() == "true"
+        )
+
+        df = df[
+            df["timestamp"].notna()
+            & df["src_ip"].notna()
+            & df["dest_ip"].notna()
+            & df["ipapi_dst_hosting"]
+        ]
+        if df.empty:
+            messagebox.showinfo(
+                "Beaconing",
+                "No hay filas válidas para beaconing tras aplicar filtros e IPAPI hosting.",
+            )
+            return
+
+        grouped = df.groupby(["src_ip", "dest_ip"], dropna=False)
+        results = []
+
+        for (src_ip, dest_ip), group in grouped:
+            if len(group) < 5:
+                continue
+
+            group = group.sort_values("timestamp")
+            diffs = group["timestamp"].diff().dt.total_seconds()
+            diffs = diffs.dropna()
+
+            if diffs.empty:
+                continue
+
+            std_dev = diffs.std()
+            mean_interval = diffs.mean()
+
+            if pd.isna(std_dev) or pd.isna(mean_interval):
+                continue
+
+            if std_dev < 5:
+                results.append(
+                    {
+                        "src_ip": src_ip,
+                        "dest_ip": dest_ip,
+                        "connections": len(group),
+                        "avg_interval_s": int(round(mean_interval)),
+                        "std_dev": round(float(std_dev), 2),
+                        "asn": str(group["ipapi_dst_asname"].iloc[0] or ""),
+                        "country": str(group["ipapi_dst_country"].iloc[0] or ""),
+                    }
+                )
+
+        if not results:
+            messagebox.showinfo("Beaconing", "No beaconing candidates found.")
+            return
+
+        result_df = pd.DataFrame(results)
+        result_df = result_df.sort_values(
+            by=["connections", "std_dev"],
+            ascending=[False, True],
+        ).head(20)
+
+        self._show_analysis_df(result_df, "Beaconing Candidates")
+
+    def _analysis_asn_deep(self):
+        df = self._get_analysis_df()
+        if df is None:
+            return
+
+        import pandas as pd
+
+        required = [
+            "dest_ip",
+            "ipapi_dst_asname",
+            "ipapi_dst_proxy",
+            "ipapi_dst_hosting",
+            "ipapi_dst_country",
+        ]
+        if not self._check_columns(df, required, "ASN Clustering"):
+            return
+
+        df = df.copy()
+        df["ipapi_dst_proxy"] = (
+            df["ipapi_dst_proxy"].astype(str).str.strip().str.lower() == "true"
+        )
+        df["ipapi_dst_hosting"] = (
+            df["ipapi_dst_hosting"].astype(str).str.strip().str.lower() == "true"
+        )
+        df["ipapi_dst_asname"] = df["ipapi_dst_asname"].fillna("(unknown)").astype(str)
+
+        grouped = df.groupby("ipapi_dst_asname", dropna=False)
+        results = []
+
+        for asn_name, group in grouped:
+            countries = [
+                str(value)
+                for value in group["ipapi_dst_country"].dropna().astype(str).unique()[:5]
+            ]
+
+            results.append(
+                {
+                    "asn": asn_name,
+                    "unique_ips": int(group["dest_ip"].nunique()),
+                    "connections": int(len(group)),
+                    "hosting_ratio": round(float(group["ipapi_dst_hosting"].mean()), 2),
+                    "proxy_ratio": round(float(group["ipapi_dst_proxy"].mean()), 2),
+                    "countries": ", ".join(countries),
+                }
+            )
+
+        if not results:
+            messagebox.showinfo("ASN", "No ASN clusters found.")
+            return
+
+        result_df = pd.DataFrame(results)
+        result_df = result_df.sort_values(
+            by=["hosting_ratio", "proxy_ratio", "unique_ips", "connections"],
+            ascending=[False, False, False, False],
+        ).head(20)
+
+        self._show_analysis_df(result_df, "ASN Clustering")
+
+    def _analysis_export_suspicious(self):
+        df = self._get_analysis_df()
+        if df is None:
+            return
+
+        import pandas as pd
+        from tkinter import filedialog
+
+        required = [
+            "ipapi_dst_proxy",
+            "ipapi_dst_hosting",
+            "ipapi_dst_score",
+        ]
+        if not self._check_columns(df, required, "Export Suspicious"):
+            return
+
+        df = df.copy()
+        df["ipapi_dst_score"] = pd.to_numeric(df["ipapi_dst_score"], errors="coerce").fillna(0)
+        df["ipapi_dst_proxy"] = (
+            df["ipapi_dst_proxy"].astype(str).str.strip().str.lower() == "true"
+        )
+        df["ipapi_dst_hosting"] = (
+            df["ipapi_dst_hosting"].astype(str).str.strip().str.lower() == "true"
+        )
+
+        suspicious = df[
+            (df["ipapi_dst_proxy"])
+            | (df["ipapi_dst_hosting"])
+            | (df["ipapi_dst_score"] >= 70)
+        ].copy()
+
+        if suspicious.empty:
+            messagebox.showinfo("Export", "No suspicious rows to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Guardar CSV filtrado",
+        )
+        if not path:
+            return
+
+        suspicious.to_csv(path, index=False)
+
+        if hasattr(self, "_status_var"):
+            self._status_var.set(f"Exported {len(suspicious):,} rows to {path}")
 
     def _get_ioc_filtered_rows(self, rows: list) -> list:
         if not self._pivot_ioc_only_var.get():
@@ -5551,20 +7387,22 @@ class MasterOfParserGUI:
         for _ff, _fv in (
             (
                 self._analysis_filter1_field_var.get().strip(),
-                self._analysis_filter1_value_var.get().strip(),
+                self._normalize_filter_value(
+                    self._analysis_filter1_value_var.get().strip(),
+                    self._analysis_filter1_not_var.get(),
+                ),
             ),
             (
                 self._analysis_filter2_field_var.get().strip(),
-                self._analysis_filter2_value_var.get().strip(),
+                self._normalize_filter_value(
+                    self._analysis_filter2_value_var.get().strip(),
+                    self._analysis_filter2_not_var.get(),
+                ),
             ),
         ):
             if _ff and _ff != _NO_FILTER_FIELD and _fv:
-                _op = (
-                    "≠"
-                    if _fv.startswith("!")
-                    else ("=" if _fv.startswith("=") else "≈")
-                )
-                _fparts.append(f"{_ff}{_op}{_fv.lstrip('!=').strip()}")
+                _op, _show = self._split_filter_display(_fv)
+                _fparts.append(f"{_ff}{_op}{_show}")
         if self._pivot_ioc_only_var.get():
             _fparts.append("solo IOC")
         _subtitle = "  |  ".join(_fparts)
@@ -5924,6 +7762,35 @@ class MasterOfParserGUI:
             ax.grid(axis="y", color="#e8e8e8", linestyle="--", linewidth=0.8)
         ax.tick_params(colors="#444444")
 
+    def _apply_chart_fontscale(self, fig):
+        """Escala todos los textos de una Figure según _chart_font_var (base 9)."""
+        base = self._chart_font_var.get()
+        if base == 9:
+            return
+        scale = base / 9.0
+        for ax in fig.get_axes():
+            for item in (
+                [ax.title, ax.xaxis.label, ax.yaxis.label]
+                + ax.get_xticklabels()
+                + ax.get_yticklabels()
+            ):
+                try:
+                    item.set_fontsize(max(4, item.get_fontsize() * scale))
+                except Exception:
+                    pass
+            legend = ax.get_legend()
+            if legend:
+                for t in legend.get_texts():
+                    try:
+                        t.set_fontsize(max(4, t.get_fontsize() * scale))
+                    except Exception:
+                        pass
+            for t in ax.texts:
+                try:
+                    t.set_fontsize(max(4, t.get_fontsize() * scale))
+                except Exception:
+                    pass
+
     def _draw_chart(
         self,
         labels: list,
@@ -6073,6 +7940,7 @@ class MasterOfParserGUI:
             )
         else:
             ax.set_title(f"{col}  —  {metric}", fontsize=11, pad=10, color="#222222")
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6248,6 +8116,7 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6322,6 +8191,7 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=18, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=18, color="#222222")
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6447,6 +8317,7 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6493,6 +8364,7 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6550,6 +8422,7 @@ class MasterOfParserGUI:
         )
         leg = ax.legend(fontsize=8)
         leg.set_draggable(True)
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6625,20 +8498,22 @@ class MasterOfParserGUI:
         for _ff, _fv in (
             (
                 self._analysis_filter1_field_var.get().strip(),
-                self._analysis_filter1_value_var.get().strip(),
+                self._normalize_filter_value(
+                    self._analysis_filter1_value_var.get().strip(),
+                    self._analysis_filter1_not_var.get(),
+                ),
             ),
             (
                 self._analysis_filter2_field_var.get().strip(),
-                self._analysis_filter2_value_var.get().strip(),
+                self._normalize_filter_value(
+                    self._analysis_filter2_value_var.get().strip(),
+                    self._analysis_filter2_not_var.get(),
+                ),
             ),
         ):
             if _ff and _ff != _NO_FILTER_FIELD and _fv:
-                _op = (
-                    "≠"
-                    if _fv.startswith("!")
-                    else ("=" if _fv.startswith("=") else "≈")
-                )
-                _fparts.append(f"{_ff}{_op}{_fv.lstrip('!=').strip()}")
+                _op, _show = self._split_filter_display(_fv)
+                _fparts.append(f"{_ff}{_op}{_show}")
         if self._pivot_ioc_only_var.get():
             _fparts.append("solo IOC")
         _subtitle = "  |  ".join(_fparts)
@@ -6649,6 +8524,7 @@ class MasterOfParserGUI:
         ax.set_title(
             title_line, fontsize=10 if _subtitle else 11, pad=8, color="#222222"
         )
+        self._apply_chart_fontscale(self._fig)
         self._fig.tight_layout()
         self._canvas_mpl.draw()
         self._analysis_zoom_stack.clear()
@@ -6659,16 +8535,22 @@ class MasterOfParserGUI:
         )
         self._nb.select(self._tab_analysis)
 
-    def _generate_histogram_view(self):
+    def _generate_histogram_view(self, show_dialogs: bool = True):
         if self._hist_generate_btn.cget("state") == "disabled":
             return
         if not self._all_rows or not self._csv_columns:
-            messagebox.showwarning("Sin datos", "Carga primero un CSV para analizarlo.")
+            if show_dialogs:
+                messagebox.showwarning("Sin datos", "Carga primero un CSV para analizarlo.")
+            else:
+                self._hist_status_var.set("Sin datos.")
             return
         if "timestamp" not in self._csv_columns:
-            messagebox.showerror(
-                "Sin timestamp", "El CSV no contiene la columna 'timestamp'."
-            )
+            if show_dialogs:
+                messagebox.showerror(
+                    "Sin timestamp", "El CSV no contiene la columna 'timestamp'."
+                )
+            else:
+                self._hist_status_var.set("Sin timestamp.")
             return
 
         bucket = self._hist_bucket_var.get()
@@ -6676,44 +8558,69 @@ class MasterOfParserGUI:
         series_field = self._hist_series_col_var.get().strip()
         vendor_filter = self._hist_vendor_var.get().strip()
         filter1_field = self._hist_filter1_field_var.get().strip()
-        filter1_value = self._hist_filter1_value_var.get().strip()
+        filter1_value = self._normalize_filter_value(
+            self._hist_filter1_value_var.get().strip(),
+            self._hist_filter1_not_var.get(),
+        )
         filter2_field = self._hist_filter2_field_var.get().strip()
-        filter2_value = self._hist_filter2_value_var.get().strip()
+        filter2_value = self._normalize_filter_value(
+            self._hist_filter2_value_var.get().strip(),
+            self._hist_filter2_not_var.get(),
+        )
+        filter_mode = self._hist_filter_mode_var.get().strip()
         from_value = self._hist_from_var.get().strip()
         to_value = self._hist_to_var.get().strip()
 
         if series_field != _NO_SERIES_FIELD and not self._field_exists_for_analysis(
             series_field
         ):
-            messagebox.showerror(
-                "Campo no disponible", f"La serie '{series_field}' no existe."
-            )
+            if show_dialogs:
+                messagebox.showerror(
+                    "Campo no disponible", f"La serie '{series_field}' no existe."
+                )
+            else:
+                self._hist_status_var.set("Campo de serie no disponible.")
             return
 
         if from_value and self._parse_time_bound(from_value) is None:
-            messagebox.showerror(
-                "Fecha inválida", "No se pudo interpretar la fecha 'Desde'."
-            )
+            if show_dialogs:
+                messagebox.showerror(
+                    "Fecha inválida", "No se pudo interpretar la fecha 'Desde'."
+                )
+            else:
+                self._hist_status_var.set("Fecha 'Desde' inválida.")
             return
         if to_value and self._parse_time_bound(to_value, is_end=True) is None:
-            messagebox.showerror(
-                "Fecha inválida", "No se pudo interpretar la fecha 'Hasta'."
-            )
+            if show_dialogs:
+                messagebox.showerror(
+                    "Fecha inválida", "No se pudo interpretar la fecha 'Hasta'."
+                )
+            else:
+                self._hist_status_var.set("Fecha 'Hasta' inválida.")
             return
 
         metric_idx = None
         if metric != "Recuento":
             metric_name = metric.replace("Suma ", "")
             if metric_name not in self._csv_columns:
-                messagebox.showerror(
-                    "Métrica no disponible", f"No existe la columna '{metric_name}'."
-                )
+                if show_dialogs:
+                    messagebox.showerror(
+                        "Métrica no disponible", f"No existe la columna '{metric_name}'."
+                    )
+                else:
+                    self._hist_status_var.set("Métrica no disponible.")
                 return
             metric_idx = self._csv_columns.index(metric_name)
 
         # Capturar variables de tkinter antes de ceder el hilo principal
         exclude_empty = self._hist_exclude_empty_var.get()
         ioc_only = self._hist_ioc_only_var.get()
+        ioc_types_hist = [
+            k for k, v in getattr(self, "_hist_ioc_type_vars", {}).items() if v.get()
+        ] or None
+        ipapi_types_hist = [
+            k for k, v in getattr(self, "_hist_ipapi_type_vars", {}).items() if v.get()
+        ] or None
         fill_gaps = self._hist_fill_gaps_var.get()
         topn_all = self._hist_topn_all.get()
         try:
@@ -6728,6 +8635,7 @@ class MasterOfParserGUI:
         self._hist_generate_btn.configure(state="disabled")
         self._hist_status_var.set("Calculando histograma…")
         self._set_global_progress(0, "Generando histograma... 0%")
+        self._clear_histogram_render("Calculando histograma…")
         self.root.update_idletasks()
 
         def _worker():
@@ -6739,19 +8647,35 @@ class MasterOfParserGUI:
                     filter1_value=filter1_value,
                     filter2_field=filter2_field,
                     filter2_value=filter2_value,
+                    filter_mode=filter_mode,
                     ioc_only=ioc_only,
                     from_value=from_value,
                     to_value=to_value,
+                    ioc_types=ioc_types_hist,
+                    ipapi_types=ipapi_types_hist,
                 )
                 if not rows:
 
                     def _no_data():
-                        messagebox.showwarning(
-                            "Sin datos",
-                            "No hay filas que cumplan los filtros seleccionados.",
+                        details = self._build_filter_subtitle(
+                            vendor_filter,
+                            filter1_field,
+                            filter1_value,
+                            filter2_field,
+                            filter2_value,
+                            filter_mode=filter_mode,
+                            ioc_only=ioc_only,
+                            from_value=from_value,
+                            to_value=to_value,
                         )
+                        msg = "No hay filas que cumplan los filtros seleccionados."
+                        if details:
+                            msg += f"\n\nConfiguracion actual: {details}"
+                        if show_dialogs:
+                            messagebox.showwarning("Sin datos", msg)
                         self._hist_generate_btn.configure(state="normal")
                         self._hist_status_var.set("Sin datos.")
+                        self._finish_global_progress("Sin datos.")
 
                     self.root.after(0, _no_data)
                     return
@@ -6760,11 +8684,14 @@ class MasterOfParserGUI:
                 grouped: dict = defaultdict(lambda: defaultdict(float))
                 series_totals: Counter = Counter()
                 parsed_rows = 0
+                valid_timestamps = 0
+                skipped_empty_series = 0
                 total_rows = max(1, len(rows))
                 for idx, row in enumerate(rows, 1):
                     dt = _parse_timestamp(row[timestamp_idx])
                     if dt is None:
                         continue
+                    valid_timestamps += 1
                     bucket_dt = _floor_timestamp(dt, bucket)
                     if series_field == _NO_SERIES_FIELD:
                         series_value = "Total"
@@ -6773,6 +8700,7 @@ class MasterOfParserGUI:
                             self._get_row_value(row, series_field) or "(vacío)"
                         )
                         if exclude_empty and series_value == "(vacío)":
+                            skipped_empty_series += 1
                             continue
                     value = 1 if metric_idx is None else _safe_float(row[metric_idx])
                     grouped[bucket_dt][series_value] += value
@@ -6789,11 +8717,34 @@ class MasterOfParserGUI:
 
                 if not grouped:
 
+                    if (
+                        series_field != _NO_SERIES_FIELD
+                        and exclude_empty
+                        and valid_timestamps > 0
+                        and skipped_empty_series == valid_timestamps
+                    ):
+
+                        def _no_series_values():
+                            msg = (
+                                "Hay datos en el rango temporal, pero la serie "
+                                f"'{series_field}' está vacía en todas las filas filtradas "
+                                "y la opción de excluir vacíos está activa."
+                            )
+                            if show_dialogs:
+                                messagebox.showwarning("Serie vacía", msg)
+                            self._hist_generate_btn.configure(state="normal")
+                            self._hist_status_var.set("Serie vacía tras aplicar filtros.")
+                            self._finish_global_progress("Serie vacía tras aplicar filtros.")
+
+                        self.root.after(0, _no_series_values)
+                        return
+
                     def _no_ts():
-                        messagebox.showwarning(
-                            "Sin serie temporal",
-                            "No hay timestamps válidos tras aplicar los filtros.",
-                        )
+                        if show_dialogs:
+                            messagebox.showwarning(
+                                "Sin serie temporal",
+                                "No hay timestamps válidos tras aplicar los filtros.",
+                            )
                         self._hist_generate_btn.configure(state="normal")
                         self._hist_status_var.set("Sin timestamps válidos.")
                         self._finish_global_progress("Sin timestamps válidos.")
@@ -6857,6 +8808,7 @@ class MasterOfParserGUI:
                     "filter1_value": filter1_value,
                     "filter2_field": filter2_field,
                     "filter2_value": filter2_value,
+                    "filter_mode": filter_mode,
                     "ioc_only": ioc_only,
                     "from_value": from_value,
                     "to_value": to_value,
@@ -6874,7 +8826,8 @@ class MasterOfParserGUI:
                     self._hist_generate_btn.configure(state="normal")
                     self._hist_status_var.set("Error al calcular histograma.")
                     self._finish_global_progress("Error al generar histograma.")
-                    messagebox.showerror("Error en histograma", str(exc))
+                    if show_dialogs:
+                        messagebox.showerror("Error en histograma", str(exc))
 
                 self.root.after(0, _fail)
 
@@ -6890,6 +8843,7 @@ class MasterOfParserGUI:
         filter1_value = result["filter1_value"]
         filter2_field = result["filter2_field"]
         filter2_value = result["filter2_value"]
+        filter_mode = result.get("filter_mode", "AND")
         ioc_only = result["ioc_only"]
         from_value = result["from_value"]
         to_value = result["to_value"]
@@ -6900,25 +8854,7 @@ class MasterOfParserGUI:
         ordered_buckets = result["ordered_buckets"]
         parsed_rows = result["parsed_rows"]
 
-        tree = self._hist_tree
-        tree.delete(*tree.get_children())
-        tree["columns"] = ("serie", "total", "% total")
-        for name, width in (("serie", 220), ("total", 100), ("% total", 80)):
-            tree.heading(name, text=name)
-            tree.column(name, width=width, minwidth=70)
-        grand_total = sum(series_totals[name] for name in series_names) or 1
-        for name in series_names:
-            total_value = series_totals[name]
-            disp = (
-                f"{total_value:,.0f}"
-                if total_value == int(total_value)
-                else f"{total_value:,.1f}"
-            )
-            tree.insert(
-                "",
-                "end",
-                values=(name, disp, f"{(total_value / grand_total) * 100:.1f}%"),
-            )
+        self._refresh_histogram_tree(result)
 
         if self._hist_canvas_mpl is not None:
             self._hist_fig.clear()
@@ -6945,7 +8881,7 @@ class MasterOfParserGUI:
                         label=name,
                     )
                     bottoms = [bottoms[i] + values[i] for i in range(len(values))]
-                leg = ax.legend(fontsize=7, ncol=2, loc="upper left")
+                leg = ax.legend(fontsize=8, ncol=2, loc="upper left")
                 leg.set_draggable(True)
 
             self._style_axis(ax, value_axis="y")
@@ -6961,6 +8897,7 @@ class MasterOfParserGUI:
                 filter1_value,
                 filter2_field,
                 filter2_value,
+                filter_mode=filter_mode,
                 ioc_only=ioc_only,
                 from_value=from_value,
                 to_value=to_value,
@@ -6976,6 +8913,7 @@ class MasterOfParserGUI:
             else:
                 ax.set_title(title, fontsize=11, pad=10, color="#222222")
 
+            self._apply_chart_fontscale(self._hist_fig)
             self._hist_fig.tight_layout()
             self._hist_canvas_mpl.draw()
             self._hist_zoom_stack.clear()
@@ -7002,6 +8940,8 @@ class MasterOfParserGUI:
 
     def _on_hist_series_select(self, _event=None):
         """Redibuja histograma destacando las series seleccionadas en el tree."""
+        if getattr(self, "_hist_table_by_bucket_var", None) and self._hist_table_by_bucket_var.get():
+            return
         data = getattr(self, "_hist_chart_data", None)
         if not data or self._hist_canvas_mpl is None:
             return
@@ -7046,10 +8986,10 @@ class MasterOfParserGUI:
                 Patch(facecolor=all_colors[i], label=n)
                 for i, n in enumerate(series_names) if n in highlighted
             ]
-            leg = ax.legend(handles=legend_els, fontsize=7, ncol=2, loc="upper left")
+            leg = ax.legend(handles=legend_els, fontsize=8, ncol=2, loc="upper left")
             leg.set_draggable(True)
         elif len(series_names) > 1:
-            leg = ax.legend(fontsize=7, ncol=2, loc="upper left")
+            leg = ax.legend(fontsize=8, ncol=2, loc="upper left")
             leg.set_draggable(True)
 
         self._style_axis(ax, value_axis="y")
@@ -7063,8 +9003,84 @@ class MasterOfParserGUI:
             ax.set_title(f"{title}\n{subtitle}", fontsize=10, pad=8, color="#222222")
         else:
             ax.set_title(title, fontsize=11, pad=10, color="#222222")
+        self._apply_chart_fontscale(self._hist_fig)
         self._hist_fig.tight_layout()
         self._hist_canvas_mpl.draw()
+
+    def _clear_histogram_render(self, message: str | None = None):
+        self._last_hist_result = {}
+        self._hist_chart_data = None
+        if hasattr(self, "_hist_tree"):
+            tree = self._hist_tree
+            tree.delete(*tree.get_children())
+            tree["columns"] = ()
+        if self._hist_canvas_mpl is not None:
+            self._hist_fig.clear()
+            ax = self._hist_fig.add_subplot(111)
+            ax.axis("off")
+            if message:
+                ax.text(
+                    0.5,
+                    0.5,
+                    message,
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="#666666",
+                )
+            self._hist_canvas_mpl.draw()
+
+    def _refresh_histogram_tree(self, result: dict | None = None):
+        result = result or getattr(self, "_last_hist_result", None)
+        if not result or not hasattr(self, "_hist_tree"):
+            return
+
+        tree = self._hist_tree
+        tree.delete(*tree.get_children())
+
+        series_names = result.get("series_names", [])
+        series_totals = result.get("series_totals", {})
+        series_matrix = result.get("series_matrix", {})
+        labels = result.get("labels", [])
+
+        if getattr(self, "_hist_table_by_bucket_var", None) and self._hist_table_by_bucket_var.get():
+            columns = ("periodo",) + tuple(series_names)
+            tree["columns"] = columns
+            tree.heading("periodo", text="periodo")
+            tree.column("periodo", width=120, minwidth=90, stretch=False)
+            for name in series_names:
+                tree.heading(name, text=name)
+                tree.column(name, width=110, minwidth=80, stretch=False)
+            for idx_b, label in enumerate(labels):
+                row_vals = [label]
+                for name in series_names:
+                    value = (
+                        series_matrix.get(name, [0])[idx_b]
+                        if idx_b < len(series_matrix.get(name, []))
+                        else 0
+                    )
+                    disp = f"{value:,.0f}" if value == int(value) else f"{value:,.1f}"
+                    row_vals.append(disp)
+                tree.insert("", "end", values=tuple(row_vals))
+            return
+
+        tree["columns"] = ("serie", "total", "% total")
+        for name, width in (("serie", 220), ("total", 100), ("% total", 80)):
+            tree.heading(name, text=name)
+            tree.column(name, width=width, minwidth=70)
+        grand_total = sum(series_totals[name] for name in series_names) or 1
+        for name in series_names:
+            total_value = series_totals[name]
+            disp = (
+                f"{total_value:,.0f}"
+                if total_value == int(total_value)
+                else f"{total_value:,.1f}"
+            )
+            tree.insert(
+                "",
+                "end",
+                values=(name, disp, f"{(total_value / grand_total) * 100:.1f}%"),
+            )
 
     def _zoom_axis(self, ax, x: float, y: float, zoom_factor: float = 0.5):
         x0, x1 = ax.get_xlim()
@@ -7186,6 +9202,7 @@ class MasterOfParserGUI:
         f2_value = self._analysis_filter2_value_var.get().strip()
         if not f2_value or f2_field == _NO_FILTER_FIELD:
             self._analysis_filter2_field_var.set(filter_field)
+            self._analysis_filter2_not_var.set(False)
             self._analysis_filter2_value_var.set(filter_value)
         else:
             if messagebox.askyesno(
@@ -7194,6 +9211,7 @@ class MasterOfParserGUI:
                 f"¿Reemplazar con {filter_field}={clicked_label}?",
             ):
                 self._analysis_filter2_field_var.set(filter_field)
+                self._analysis_filter2_not_var.set(False)
                 self._analysis_filter2_value_var.set(filter_value)
             else:
                 return
@@ -7714,16 +9732,22 @@ Flujo recomendado:
     print(f"[+] Forti src_zone: {args.forti_src_zone_mode}")
     print(f"[+] IOC src_ip: {not args.no_ioc_src}, dest_ip: {not args.no_ioc_dst}")
 
-    # ── Detectar formato QRadar ──────────────────────────────────────────────
+    # ── Detectar formato ──────────────────────────────────────────────────────
     qradar_result = detect_qradar_tsv(args.log_file)
+    cim_csv_result = detect_cim_csv(args.log_file) if not qradar_result else None
     qradar_cols = None
     qradar_delim = ","
+    cim_csv_cols = None
+    cim_csv_delim = ","
     if qradar_result:
         qradar_cols, qradar_delim = qradar_result
         print(
             f"[+] Formato:   QRadar ({len(qradar_cols)} columnas, delim='{qradar_delim}', Payload incluido)"
         )
-        payload_idx = qradar_cols.index(_QRADAR_PAYLOAD_COL)
+        payload_idx = next(i for i, c in enumerate(qradar_cols) if c.strip().lower() == "payload")
+    elif cim_csv_result:
+        cim_csv_cols, cim_csv_delim = cim_csv_result
+        print(f"[+] Formato:   CSV columnar pre-parseado ({len(cim_csv_cols)} columnas, delim='{cim_csv_delim}')")
     else:
         print("[+] Formato:   raw syslog (una línea = un evento)")
 
@@ -7736,101 +9760,167 @@ Flujo recomendado:
     last_pct = -1
     unique_ips: set = set()  # para --extract-ips
 
-    with (
-        open(args.log_file, encoding="utf-8", errors="replace") as fin,
-        open(output_file, "w", newline="", encoding="utf-8-sig") as fout,
-    ):
-        writer = csv.DictWriter(fout, fieldnames=output_columns, extrasaction="ignore")
-        writer.writeheader()
+    # ── Path especial: CSV columnar (columnas separadas, sin Payload) ─────────
+    if cim_csv_cols:
+        with (
+            open(args.log_file, encoding="utf-8-sig", errors="replace", newline="") as fin,
+            open(output_file, "w", newline="", encoding="utf-8-sig") as fout,
+        ):
+            writer = csv.DictWriter(fout, fieldnames=output_columns, extrasaction="ignore")
+            writer.writeheader()
+            reader = csv.DictReader(fin, delimiter=cim_csv_delim)
+            rows_list = list(reader)
+            total_rows = len(rows_list)
+            for i, raw_row in enumerate(rows_list, 1):
+                pct = (i * 100) // max(total_rows, 1)
+                if pct % 5 == 0 and pct != last_pct:
+                    print(f"    {pct:3d}%  ({i:,}/{total_rows:,})", end="\r")
+                    last_pct = pct
+                record = {_normalize_csv_key(k): str(v or "").strip() for k, v in raw_row.items()}
+                if not record.get("src_ip"):
+                    record["src_ip"] = record.get("qradar_src_ip", "")
+                if not record.get("dest_ip"):
+                    record["dest_ip"] = record.get("qradar_dest_ip", "")
+                if not record.get("src_port"):
+                    record["src_port"] = record.get("qradar_src_port", "")
+                if not record.get("dest_port"):
+                    record["dest_port"] = record.get("qradar_dest_port", "")
+                if not record.get("vendor"):
+                    record["vendor"] = "QRadar-CSV"
+                record = unify_cim_record(record, args.forti_src_zone_mode)
+                src_ip = record.get("src_ip", "")
+                dest_ip = record.get("dest_ip", "")
+                if args.extract_ips:
+                    if src_ip: unique_ips.add(src_ip)
+                    if dest_ip: unique_ips.add(dest_ip)
+                if not args.no_ioc_src:
+                    record.update(enrich_ioc_candidates(
+                        [src_ip, record.get("src_ip_nat", "")],
+                        ioc_set, ioc_map, "src", ioc_raw_keys))
+                if not args.no_ioc_dst:
+                    record.update(enrich_ioc_candidates(
+                        [dest_ip, record.get("dest_ip_nat", "")],
+                        ioc_set, ioc_map, "dst", ioc_raw_keys))
+                src_hit = record.get("ioc_src") == "YES" if not args.no_ioc_src else False
+                dst_hit = record.get("ioc_dst") == "YES" if not args.no_ioc_dst else False
+                has_ioc = src_hit or dst_hit
+                if has_ioc:
+                    ioc_hits += 1
+                    ioc_hits_by_vendor[record.get("vendor", "(sin_vendor)")] += 1
+                if args.ioc_only and not has_ioc:
+                    skipped += 1
+                    continue
+                if args.raw_event:
+                    record["raw_event"] = ""
+                writer.writerow({col: record.get(col, "") for col in output_columns})
+                parsed += 1
+                vendor_counts[record.get("vendor", "(sin_vendor)")] += 1
 
-        first_line_skipped = False
-        for i, line in enumerate(fin, 1):
-            # Progreso cada 5%
-            pct = (i * 100) // total_lines
-            if pct % 5 == 0 and pct != last_pct:
-                print(f"    {pct:3d}%  ({i:,}/{total_lines:,})", end="\r")
-                last_pct = pct
+    if not cim_csv_cols:
+        with (
+            open(args.log_file, encoding="utf-8", errors="replace") as fin,
+            open(output_file, "w", newline="", encoding="utf-8-sig") as fout,
+        ):
+            writer = csv.DictWriter(fout, fieldnames=output_columns, extrasaction="ignore")
+            writer.writeheader()
 
-            line = line.strip()
-            if not line:
-                continue
+            first_line_skipped = False
+            for i, line in enumerate(fin, 1):
+                # Progreso cada 5%
+                pct = (i * 100) // total_lines
+                if pct % 5 == 0 and pct != last_pct:
+                    print(f"    {pct:3d}%  ({i:,}/{total_lines:,})", end="\r")
+                    last_pct = pct
 
-            # QRadar TSV: saltar cabecera y extraer campos
-            qradar_extra: dict = {}
-            if qradar_cols:
-                if not first_line_skipped:
-                    first_line_skipped = True
-                    continue  # saltar cabecera
-                parts = _split_qradar_line(line, len(qradar_cols), qradar_delim)
-                qradar_extra = _extract_qradar_fields(qradar_cols, parts)
-                line = parts[payload_idx] if payload_idx < len(parts) else ""
+                line = line.strip()
                 if not line:
+                    continue
+
+                # QRadar TSV: saltar cabecera y extraer campos
+                qradar_extra: dict = {}
+                if qradar_cols:
+                    if not first_line_skipped:
+                        first_line_skipped = True
+                        continue  # saltar cabecera
+                    parts = _split_qradar_line(line, len(qradar_cols), qradar_delim)
+                    qradar_extra = _extract_qradar_fields(qradar_cols, parts)
+                    line = parts[payload_idx] if payload_idx < len(parts) else ""
+                    if not line:
+                        skipped += 1
+                        continue
+
+                record = parse_line(line)
+                if not record:
                     skipped += 1
                     continue
 
-            record = parse_line(line)
-            if not record:
-                skipped += 1
-                continue
+                record = unify_cim_record(record, args.forti_src_zone_mode)
 
-            record = unify_cim_record(record, args.forti_src_zone_mode)
+                # Merge columnas QRadar (no sobreescriben campos del payload)
+                if qradar_extra:
+                    for k, v in qradar_extra.items():
+                        if v and not record.get(k):
+                            record[k] = v
 
-            # Merge columnas QRadar (no sobreescriben campos del payload)
-            if qradar_extra:
-                for k, v in qradar_extra.items():
-                    if v and not record.get(k):
-                        record[k] = v
+                if not record.get("src_ip"):
+                    record["src_ip"] = record.get("qradar_src_ip", "")
+                if not record.get("dest_ip"):
+                    record["dest_ip"] = record.get("qradar_dest_ip", "")
+                if not record.get("src_port"):
+                    record["src_port"] = record.get("qradar_src_port", "")
+                if not record.get("dest_port"):
+                    record["dest_port"] = record.get("qradar_dest_port", "")
 
-            vendor_name = record.get("vendor", "(sin_vendor)")
-            vendor_counts[vendor_name] += 1
+                vendor_name = record.get("vendor", "(sin_vendor)")
+                vendor_counts[vendor_name] += 1
 
-            src_ip = record.get("src_ip", "")
-            dest_ip = record.get("dest_ip", "")
+                src_ip = record.get("src_ip", "")
+                dest_ip = record.get("dest_ip", "")
 
-            # Acumular IPs únicas para --extract-ips
-            if args.extract_ips:
-                if src_ip:
-                    unique_ips.add(src_ip)
-                if dest_ip:
-                    unique_ips.add(dest_ip)
+                # Acumular IPs únicas para --extract-ips
+                if args.extract_ips:
+                    if src_ip:
+                        unique_ips.add(src_ip)
+                    if dest_ip:
+                        unique_ips.add(dest_ip)
 
-            # Enriquecimiento IOC según dirección
-            if not args.no_ioc_src:
-                record.update(
-                    enrich_ioc_candidates(
-                        [record.get("src_ip", ""), record.get("src_ip_nat", "")],
-                        ioc_set,
-                        ioc_map,
-                        "src",
-                        ioc_raw_keys,
+                # Enriquecimiento IOC según dirección
+                if not args.no_ioc_src:
+                    record.update(
+                        enrich_ioc_candidates(
+                            [record.get("src_ip", ""), record.get("src_ip_nat", "")],
+                            ioc_set,
+                            ioc_map,
+                            "src",
+                            ioc_raw_keys,
+                        )
                     )
-                )
-            if not args.no_ioc_dst:
-                record.update(
-                    enrich_ioc_candidates(
-                        [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
-                        ioc_set,
-                        ioc_map,
-                        "dst",
-                        ioc_raw_keys,
+                if not args.no_ioc_dst:
+                    record.update(
+                        enrich_ioc_candidates(
+                            [record.get("dest_ip", ""), record.get("dest_ip_nat", "")],
+                            ioc_set,
+                            ioc_map,
+                            "dst",
+                            ioc_raw_keys,
+                        )
                     )
-                )
 
-            src_hit = record.get("ioc_src") == "YES" if not args.no_ioc_src else False
-            dst_hit = record.get("ioc_dst") == "YES" if not args.no_ioc_dst else False
-            has_ioc = src_hit or dst_hit
-            if has_ioc:
-                ioc_hits += 1
-                ioc_hits_by_vendor[vendor_name] += 1
+                src_hit = record.get("ioc_src") == "YES" if not args.no_ioc_src else False
+                dst_hit = record.get("ioc_dst") == "YES" if not args.no_ioc_dst else False
+                has_ioc = src_hit or dst_hit
+                if has_ioc:
+                    ioc_hits += 1
+                    ioc_hits_by_vendor[vendor_name] += 1
 
-            if args.ioc_only and not has_ioc:
-                continue
+                if args.ioc_only and not has_ioc:
+                    continue
 
-            # Escribir fila CIM
-            if args.raw_event:
-                record["raw_event"] = line
-            writer.writerow({col: record.get(col, "") for col in output_columns})
-            parsed += 1
+                # Escribir fila CIM
+                if args.raw_event:
+                    record["raw_event"] = line
+                writer.writerow({col: record.get(col, "") for col in output_columns})
+                parsed += 1
 
     # ── Exportar IPs únicas para IOCsOfSpades ────────────────────────────────
     if args.extract_ips and unique_ips:
